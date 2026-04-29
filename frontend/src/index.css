@@ -1,0 +1,120 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --font-heading: 'Manrope', 'Segoe UI', sans-serif;
+  --font-body: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+
+  --bg: #f5f7fb;
+  --bg-soft: #eef2f9;
+  --surface: #ffffff;
+  --surface-soft: #f9fbff;
+  --surface-muted: #f4f7fc;
+  --ink: #11203e;
+  --ink-soft: #38507a;
+  --muted: #6d7fa3;
+  --muted-soft: #95a3bf;
+  --line: #dbe4f2;
+  --line-strong: #cad6ea;
+  --accent: #635bff;
+  --accent-soft: rgba(99, 91, 255, 0.12);
+  --success: #0abf7d;
+  --success-soft: rgba(10, 191, 125, 0.12);
+  --warning: #ff9800;
+  --warning-soft: rgba(255, 152, 0, 0.12);
+  --danger: #ff5f7a;
+  --danger-soft: rgba(255, 95, 122, 0.12);
+  --shadow: 0 18px 38px -24px rgba(31, 51, 85, 0.18);
+  --section-padding: 0.95rem;
+
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background: linear-gradient(180deg, #fbfcff 0%, #f3f6fb 100%);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
+  background-size: 36px 36px;
+  opacity: 0.4;
+  -webkit-mask-image: radial-gradient(circle at center, rgba(17, 32, 62, 1) 40%, transparent 90%);
+  mask-image: radial-gradient(circle at center, rgba(17, 32, 62, 1) 40%, transparent 90%);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-family: var(--font-heading);
+  letter-spacing: 0;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  outline: none;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.78rem 0.9rem;
+  background: var(--surface);
+  color: var(--ink);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: rgba(99, 91, 255, 0.42);
+  box-shadow: 0 0 0 4px rgba(99, 91, 255, 0.08);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+@media (max-width: 900px) {
+  :root {
+    font-size: 15px;
+  }
+}
