@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 function resolveApiBase() {
   if (import.meta.env.VITE_API_BASE_URL) {
@@ -73,6 +73,7 @@ export function AtlasProvider({ children }) {
   const [rawProfile, setRawProfile] = useState(null)
   const [cleanedProfile, setCleanedProfile] = useState(null)
   const [cleaningSummary, setCleaningSummary] = useState(null)
+  const [comparison, setComparison] = useState(null)
 
   const [analysis, setAnalysis] = useState(null)
   const [charts, setCharts] = useState(null)
@@ -89,6 +90,7 @@ export function AtlasProvider({ children }) {
     setRawProfile(null)
     setCleanedProfile(null)
     setCleaningSummary(null)
+    setComparison(null)
     setAnalysis(null)
     setCharts(null)
     setErrorMessage('')
@@ -99,7 +101,7 @@ export function AtlasProvider({ children }) {
     setErrorMessage('')
   }
 
-  async function loadLatestOutputs(targetDatasetId) {
+  const loadLatestOutputs = useCallback(async (targetDatasetId) => {
     const [analysisPayload, chartsPayload] = await Promise.all([
       fetchJson(`/datasets/${targetDatasetId}/analyze?stage=latest`),
       fetchJson(`/datasets/${targetDatasetId}/visualize?stage=latest`),
@@ -107,7 +109,7 @@ export function AtlasProvider({ children }) {
 
     setAnalysis(analysisPayload.analysis)
     setCharts(chartsPayload.charts)
-  }
+  }, [])
 
   async function uploadDataset(file) {
     if (!file) {
@@ -143,6 +145,7 @@ export function AtlasProvider({ children }) {
       setRawProfile(uploadPayload.profile ?? null)
       setCleanedProfile(null)
       setCleaningSummary(null)
+      setComparison(null)
       setAnalysis(null)
       setCharts(null)
 
@@ -170,10 +173,11 @@ export function AtlasProvider({ children }) {
 
       setCleaningSummary(cleanPayload.cleaning_summary)
 
-      const [statePayload, rawPayload, cleanedPayload] = await Promise.all([
+      const [statePayload, rawPayload, cleanedPayload, comparisonPayload] = await Promise.all([
         fetchJson(`/datasets/${datasetId}/state?preview_rows=20`),
         fetchJson(`/datasets/${datasetId}/profile?stage=raw&preview_rows=20`),
         fetchJson(`/datasets/${datasetId}/profile?stage=cleaned&preview_rows=20`),
+        fetchJson(`/datasets/${datasetId}/compare?limit=60`),
       ])
 
       setUploadedDataset({
@@ -187,9 +191,52 @@ export function AtlasProvider({ children }) {
 
       setRawProfile(rawPayload.profile)
       setCleanedProfile(cleanedPayload.profile)
+      setComparison(comparisonPayload.comparison ?? null)
       await loadLatestOutputs(datasetId)
     } catch (error) {
       setErrorMessage(error.message)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function saveDatasetEdits({ columns, rows }) {
+    if (!datasetId) {
+      setErrorMessage('Upload a dataset before saving edits.')
+      return
+    }
+
+    setBusyAction('saving')
+    setErrorMessage('')
+
+    try {
+      const payload = await fetchJson(`/datasets/${datasetId}/raw`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ columns, rows }),
+      })
+
+      setUploadedDataset({
+        columns: payload.columns ?? [],
+        rows: payload.rows ?? [],
+      })
+      setRawProfile(payload.profile ?? null)
+      setCleanedProfile(null)
+      setCleaningSummary(null)
+      setComparison(null)
+      setAnalysis(null)
+      setCharts(null)
+      setDatasetMeta((previous) => ({
+        ...previous,
+        sizeBytes: Number(payload.approx_size_bytes) || previous.sizeBytes,
+      }))
+
+      await loadLatestOutputs(datasetId)
+    } catch (error) {
+      setErrorMessage(error.message)
+      throw error
     } finally {
       setBusyAction('idle')
     }
@@ -213,7 +260,7 @@ export function AtlasProvider({ children }) {
     }
   }
 
-  async function fetchDatasetTable({ stage = 'raw', page = 1, pageSize = 50 } = {}) {
+  const fetchDatasetTable = useCallback(async ({ stage = 'raw', page = 1, pageSize = 50 } = {}) => {
     if (!datasetId) {
       throw new Error('No dataset available yet.')
     }
@@ -221,7 +268,48 @@ export function AtlasProvider({ children }) {
     return fetchJson(
       `/datasets/${datasetId}/table?stage=${stage}&page=${page}&page_size=${pageSize}`,
     )
-  }
+  }, [datasetId])
+
+  const fetchComparison = useCallback(async ({ limit = 60 } = {}) => {
+    if (!datasetId) {
+      throw new Error('No dataset available yet.')
+    }
+
+    const payload = await fetchJson(`/datasets/${datasetId}/compare?limit=${limit}`)
+    setComparison(payload.comparison ?? null)
+    return payload
+  }, [datasetId])
+
+  const generateChartData = useCallback(
+    async ({
+      chartType = 'bar',
+      stage = 'latest',
+      dimension = '',
+      measure = '',
+      aggregation = 'count',
+    } = {}) => {
+      if (!datasetId) {
+        throw new Error('No dataset available yet.')
+      }
+
+      const searchParams = new URLSearchParams({
+        chart_type: chartType,
+        stage,
+        aggregation,
+      })
+
+      if (dimension) {
+        searchParams.set('dimension', dimension)
+      }
+
+      if (measure) {
+        searchParams.set('measure', measure)
+      }
+
+      return fetchJson(`/datasets/${datasetId}/chart?${searchParams.toString()}`)
+    },
+    [datasetId],
+  )
 
   useEffect(() => {
     const storedDatasetId = getStoredDatasetId()
@@ -238,9 +326,12 @@ export function AtlasProvider({ children }) {
       try {
         const statePayload = await fetchJson(`/datasets/${storedDatasetId}/state?preview_rows=20`)
 
-        const [analysisPayload, chartsPayload] = await Promise.all([
+        const [analysisPayload, chartsPayload, comparisonPayload] = await Promise.all([
           fetchJson(`/datasets/${storedDatasetId}/analyze?stage=latest`),
           fetchJson(`/datasets/${storedDatasetId}/visualize?stage=latest`),
+          statePayload.cleaned_profile
+            ? fetchJson(`/datasets/${storedDatasetId}/compare?limit=60`)
+            : Promise.resolve(null),
         ])
 
         if (cancelled) {
@@ -260,6 +351,7 @@ export function AtlasProvider({ children }) {
         setRawProfile(statePayload.raw_profile ?? null)
         setCleanedProfile(statePayload.cleaned_profile ?? null)
         setCleaningSummary(statePayload.cleaning_summary ?? null)
+        setComparison(comparisonPayload?.comparison ?? null)
         setAnalysis(analysisPayload.analysis ?? null)
         setCharts(chartsPayload.charts ?? null)
       } catch {
@@ -272,6 +364,7 @@ export function AtlasProvider({ children }) {
           setRawProfile(null)
           setCleanedProfile(null)
           setCleaningSummary(null)
+          setComparison(null)
           setAnalysis(null)
           setCharts(null)
           setErrorMessage('')
@@ -313,15 +406,19 @@ export function AtlasProvider({ children }) {
     cleanedProfile,
     activeProfile,
     cleaningSummary,
+    comparison,
     analysis,
     charts,
     workflow,
     busyAction,
     errorMessage,
     uploadDataset,
+    saveDatasetEdits,
     runAutoClean,
     generateDashboard,
     fetchDatasetTable,
+    fetchComparison,
+    generateChartData,
     clearError,
     resetWorkspace,
   }

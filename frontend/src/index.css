@@ -4,26 +4,27 @@
   --font-heading: 'Manrope', 'Segoe UI', sans-serif;
   --font-body: 'IBM Plex Sans', 'Segoe UI', sans-serif;
 
-  --bg: #f5f7fb;
-  --bg-soft: #eef2f9;
+  --bg: #f7f8f6;
+  --bg-soft: #eef3ef;
   --surface: #ffffff;
-  --surface-soft: #f9fbff;
-  --surface-muted: #f4f7fc;
-  --ink: #11203e;
-  --ink-soft: #38507a;
-  --muted: #6d7fa3;
-  --muted-soft: #95a3bf;
-  --line: #dbe4f2;
-  --line-strong: #cad6ea;
-  --accent: #635bff;
-  --accent-soft: rgba(99, 91, 255, 0.12);
-  --success: #0abf7d;
-  --success-soft: rgba(10, 191, 125, 0.12);
-  --warning: #ff9800;
-  --warning-soft: rgba(255, 152, 0, 0.12);
-  --danger: #ff5f7a;
-  --danger-soft: rgba(255, 95, 122, 0.12);
-  --shadow: 0 18px 38px -24px rgba(31, 51, 85, 0.18);
+  --surface-soft: #fafbf9;
+  --surface-muted: #f3f6f3;
+  --ink: #1d2521;
+  --ink-soft: #47564d;
+  --muted: #718178;
+  --muted-soft: #98a59d;
+  --line: #dfe7e1;
+  --line-strong: #cbd8cf;
+  --accent: #0f766e;
+  --accent-strong: #0b5f59;
+  --accent-soft: rgba(15, 118, 110, 0.12);
+  --success: #16805f;
+  --success-soft: rgba(22, 128, 95, 0.12);
+  --warning: #a76f00;
+  --warning-soft: rgba(167, 111, 0, 0.12);
+  --danger: #b4233a;
+  --danger-soft: rgba(180, 35, 58, 0.12);
+  --shadow: 0 18px 38px -26px rgba(38, 55, 45, 0.18);
   --section-padding: 0.95rem;
 
   font-family: var(--font-body);
@@ -43,20 +44,11 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
-  background: linear-gradient(180deg, #fbfcff 0%, #f3f6fb 100%);
+  background: #f7f8f6;
 }
 
 body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
-  background-size: 36px 36px;
-  opacity: 0.4;
-  -webkit-mask-image: radial-gradient(circle at center, rgba(17, 32, 62, 1) 40%, transparent 90%);
-  mask-image: radial-gradient(circle at center, rgba(17, 32, 62, 1) 40%, transparent 90%);
+  content: none;
 }
 
 h1,
@@ -95,7 +87,7 @@ select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 8px;
   padding: 0.78rem 0.9rem;
   background: var(--surface);
   color: var(--ink);
@@ -105,8 +97,8 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: rgba(99, 91, 255, 0.42);
-  box-shadow: 0 0 0 4px rgba(99, 91, 255, 0.08);
+  border-color: rgba(15, 118, 110, 0.42);
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.08);
 }
 
 #root {

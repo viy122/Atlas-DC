@@ -2,10 +2,12 @@ import { NavLink } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
 
 const LINKS = [
-  { to: '/dataset', label: 'Dataset', step: '01' },
-  { to: '/dashboard-builder', label: 'Builder', step: '02' },
-  { to: '/insights', label: 'Insights', step: '03' },
-  { to: '/reports', label: 'Reports', step: '04' },
+  { to: '/dataset', label: 'Upload', step: '01' },
+  { to: '/profiling', label: 'Profile', step: '02' },
+  { to: '/cleaning', label: 'Clean', step: '03' },
+  { to: '/analysis', label: 'Analyze', step: '04' },
+  { to: '/visualization', label: 'Visualize', step: '05' },
+  { to: '/reports', label: 'Docs', step: '06' },
 ]
 
 function Sidebar() {
@@ -16,7 +18,7 @@ function Sidebar() {
     { label: 'Profiled', active: workflow.profiled },
     { label: 'Cleaned', active: workflow.cleaned },
     { label: 'Analyzed', active: workflow.analyzed },
-    { label: 'Dashboard Ready', active: workflow.visualized },
+    { label: 'Visualized', active: workflow.visualized },
   ]
 
   return (

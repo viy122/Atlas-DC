@@ -1,5 +1,7 @@
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
+import { formatDataType } from '../utils/formatters'
 
 const PIE_COLORS = ['#5b8271', '#7f9ab0', '#9cb7a2', '#d0ad7d', '#6f8f99', '#8daaa0']
 
@@ -148,7 +150,62 @@ function LineChart({ title, subtitle, data }) {
 }
 
 function VisualizationPage() {
-  const { datasetId, charts, busyAction, errorMessage, generateDashboard } = useAtlas()
+  const {
+    datasetId,
+    activeProfile,
+    charts,
+    busyAction,
+    errorMessage,
+    generateDashboard,
+    generateChartData,
+  } = useAtlas()
+
+  const [chartType, setChartType] = useState('bar')
+  const [dimension, setDimension] = useState('')
+  const [measure, setMeasure] = useState('')
+  const [aggregation, setAggregation] = useState('count')
+  const [selectedChart, setSelectedChart] = useState(null)
+  const [chartLoading, setChartLoading] = useState(false)
+  const [chartError, setChartError] = useState('')
+
+  const columns = useMemo(() => activeProfile?.columns ?? [], [activeProfile])
+  const numericColumns = useMemo(
+    () =>
+      (activeProfile?.column_profiles ?? [])
+        .filter((column) => formatDataType(column.dtype) === 'NUMBER')
+        .map((column) => column.name),
+    [activeProfile],
+  )
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setDimension((current) => current || columns[0] || '')
+    setMeasure((current) => current || numericColumns[0] || '')
+  }, [columns, numericColumns])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  async function refreshSelectedChart() {
+    if (!datasetId || !dimension) {
+      return
+    }
+
+    setChartLoading(true)
+    setChartError('')
+
+    try {
+      const payload = await generateChartData({
+        chartType,
+        dimension,
+        measure,
+        aggregation,
+      })
+      setSelectedChart(payload.chart)
+    } catch (error) {
+      setChartError(error.message)
+    } finally {
+      setChartLoading(false)
+    }
+  }
 
   if (!datasetId) {
     return (
@@ -210,6 +267,117 @@ function VisualizationPage() {
       </section>
 
       {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
+      {chartError ? <p className="error-banner">{chartError}</p> : null}
+
+      <section className="panel visual-control-panel">
+        <div className="section-title-row">
+          <div>
+            <h3>Chart Builder</h3>
+            <p>{selectedChart?.interpretation ?? 'Choose variables and render a chart from the active dataset.'}</p>
+          </div>
+          <button
+            type="button"
+            className="action-button"
+            onClick={refreshSelectedChart}
+            disabled={chartLoading || !dimension}
+          >
+            {chartLoading ? 'Rendering...' : 'Refresh Chart'}
+          </button>
+        </div>
+
+        <div className="chart-control-grid">
+          <div className="config-group">
+            <label htmlFor="chart-type">Chart Type</label>
+            <select
+              id="chart-type"
+              value={chartType}
+              onChange={(event) => setChartType(event.target.value)}
+            >
+              <option value="bar">Bar Chart</option>
+              <option value="line">Line Chart</option>
+              <option value="pie">Pie Chart</option>
+            </select>
+          </div>
+
+          <div className="config-group">
+            <label htmlFor="chart-dimension">Variable / Dimension</label>
+            <select
+              id="chart-dimension"
+              value={dimension}
+              onChange={(event) => setDimension(event.target.value)}
+            >
+              {columns.map((column) => (
+                <option key={`dimension-${column}`} value={column}>
+                  {column}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="config-group">
+            <label htmlFor="chart-measure">Measure</label>
+            <select
+              id="chart-measure"
+              value={measure}
+              onChange={(event) => setMeasure(event.target.value)}
+            >
+              <option value="">Record count</option>
+              {numericColumns.map((column) => (
+                <option key={`measure-${column}`} value={column}>
+                  {column}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="config-group">
+            <label htmlFor="chart-aggregation">Aggregation</label>
+            <select
+              id="chart-aggregation"
+              value={aggregation}
+              onChange={(event) => setAggregation(event.target.value)}
+            >
+              <option value="count">Count</option>
+              <option value="sum">Sum</option>
+              <option value="mean">Mean</option>
+              <option value="median">Median</option>
+              <option value="min">Min</option>
+              <option value="max">Max</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      {selectedChart ? (
+        <section className="panel">
+          <div className="section-title-row">
+            <h3>Selected Visualization</h3>
+            <p>
+              {selectedChart.y_label} by {selectedChart.x_label}
+            </p>
+          </div>
+
+          {chartType === 'pie' ? (
+            <PieChart
+              title="Pie Chart"
+              subtitle={selectedChart.interpretation}
+              data={selectedChart.data}
+            />
+          ) : chartType === 'line' ? (
+            <LineChart
+              title="Line Chart"
+              subtitle={selectedChart.interpretation}
+              data={selectedChart.data}
+            />
+          ) : (
+            <BarChart
+              title="Bar Chart"
+              subtitle={selectedChart.interpretation}
+              data={selectedChart.data}
+            />
+          )}
+        </section>
+      ) : null}
 
       {charts ? (
         <section className="panel">

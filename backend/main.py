@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from io import BytesIO
 from uuid import uuid4
@@ -8,6 +9,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="ATLAS Backend", version="1.1.0")
 
@@ -27,6 +29,11 @@ app.add_middleware(
 
 DATASETS: dict[str, dict[str, object]] = {}
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+
+class DatasetUpdatePayload(BaseModel):
+    columns: list[str] = Field(default_factory=list, min_length=1)
+    rows: list[dict[str, object]] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -157,21 +164,54 @@ def _estimate_dataframe_size_bytes(df: pd.DataFrame) -> int:
 
 
 def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object]:
-    column_profiles = [
-        {
+    column_profiles: list[dict[str, object]] = []
+    basic_statistics: list[dict[str, object]] = []
+
+    for column in df.columns:
+        series = df[column]
+        missing_values = int(series.isna().sum())
+        non_null_values = int(series.notna().sum())
+        profile: dict[str, object] = {
             "name": column,
-            "dtype": str(df[column].dtype),
-            "missing_values": int(df[column].isna().sum()),
-            "non_null_values": int(df[column].notna().sum()),
+            "dtype": str(series.dtype),
+            "missing_values": missing_values,
+            "missing_percent": _round_or_none((missing_values / len(series)) * 100 if len(series) else 0, 2),
+            "non_null_values": non_null_values,
+            "unique_values": int(series.nunique(dropna=True)),
         }
-        for column in df.columns
-    ]
+
+        if pd.api.types.is_numeric_dtype(series):
+            stats = {
+                "count": non_null_values,
+                "mean": _round_or_none(series.mean()),
+                "median": _round_or_none(series.median()),
+                "min": _round_or_none(series.min()),
+                "max": _round_or_none(series.max()),
+                "std": _round_or_none(series.std()),
+            }
+            profile["statistics"] = stats
+            basic_statistics.append({"column": column, **stats})
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            non_null_series = series.dropna()
+            profile["statistics"] = {
+                "earliest": _json_safe(non_null_series.min()) if not non_null_series.empty else None,
+                "latest": _json_safe(non_null_series.max()) if not non_null_series.empty else None,
+            }
+        else:
+            values = series.dropna().astype(str)
+            if not values.empty:
+                top_value = values.value_counts().head(1)
+                label, count = next(iter(top_value.items()))
+                profile["most_frequent"] = {"label": label, "count": int(count)}
+
+        column_profiles.append(profile)
 
     return {
         "rows": int(df.shape[0]),
         "columns_count": int(df.shape[1]),
         "columns": list(df.columns),
         "column_profiles": column_profiles,
+        "basic_statistics": basic_statistics,
         "preview": _build_preview(df, limit=preview_limit),
     }
 
@@ -234,73 +274,132 @@ def _select_dataframe(dataset: dict[str, object], stage: str) -> tuple[pd.DataFr
     raise HTTPException(status_code=400, detail="Invalid stage. Use raw, cleaned, or latest")
 
 
-def _clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+DEFAULT_CLEANING_CONFIG: dict[str, object] = {
+    "placeholder_null_tokens": ("", " ", "-", "--", "N/A", "n/a", "NULL", "null", "None", "unknown", "Unknown"),
+    "critical_keywords": ("id", "email"),
+    "required_keywords": ("last_name", "lastname", "surname", "department"),
+    "date_keywords": ("date", "time", "created", "updated", "timestamp"),
+    "name_label_keywords": ("name", "label", "city", "department"),
+    "protected_text_keywords": ("email", "username", "id", "code", "acronym"),
+    "future_date_keywords": ("birth", "dob"),
+    "numeric_range_rules": {"age": {"min": 0}},
+    "fill_text_with_mode": False,
+    "required_missing_drop_threshold": None,
+    "datetime_parse_ratio": 0.65,
+    "numeric_like_ratio": 0.8,
+    "numeric_skew_threshold": 1.0,
+}
+
+
+def _normalize_column_name(column_name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(column_name).lower()).strip("_")
+
+
+def _column_matches_keywords(column_name: str, keywords: tuple[str, ...]) -> bool:
+    normalized = _normalize_column_name(column_name)
+    tokens = set(normalized.split("_"))
+
+    for keyword in keywords:
+        normalized_keyword = _normalize_column_name(keyword)
+        if normalized_keyword in tokens or normalized == normalized_keyword:
+            return True
+        if "_" in normalized_keyword and normalized_keyword in normalized:
+            return True
+
+    return False
+
+
+def _sanitize_numeric_strings(series: pd.Series) -> pd.Series:
+    return (
+        series.astype("string")
+        .str.replace(",", "", regex=False)
+        .str.replace(r"[\$€£₱]", "", regex=True)
+        .str.replace(r"\s+", "", regex=True)
+    )
+
+
+def _is_sequential_datetime(series: pd.Series) -> bool:
+    non_null = series.dropna()
+    if len(non_null) < 3:
+        return False
+    return bool(non_null.is_monotonic_increasing)
+
+
+def _clean_dataframe(
+    df: pd.DataFrame,
+    config: dict[str, object] | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    cleaning_config = {**DEFAULT_CLEANING_CONFIG, **(config or {})}
     cleaned_df = df.copy()
     rows_before = int(cleaned_df.shape[0])
     missing_before = int(cleaned_df.isna().sum().sum())
 
-    placeholder_null_tokens = {
-        "",
-        " ",
-        "-",
-        "--",
-        "n/a",
-        "null",
-        "none",
-        "unknown",
+    placeholder_tokens = {
+        str(token).strip().lower()
+        for token in cleaning_config["placeholder_null_tokens"]  # type: ignore[index]
     }
-    date_keywords = ("date", "time", "created", "updated", "timestamp")
-    name_like_keywords = ("name", "city", "department")
-    no_title_case_keywords = ("email", "username", "id", "code", "acronym")
+    critical_keywords = tuple(cleaning_config["critical_keywords"])  # type: ignore[arg-type]
+    required_keywords = tuple(cleaning_config["required_keywords"])  # type: ignore[arg-type]
+    protected_keywords = tuple(cleaning_config["protected_text_keywords"])  # type: ignore[arg-type]
+    date_keywords = tuple(cleaning_config["date_keywords"])  # type: ignore[arg-type]
+    name_label_keywords = tuple(cleaning_config["name_label_keywords"])  # type: ignore[arg-type]
+    future_date_keywords = tuple(cleaning_config["future_date_keywords"])  # type: ignore[arg-type]
 
-    def _column_matches_keywords(column_name: str, keywords: tuple[str, ...]) -> bool:
-        normalized = column_name.lower()
-        return any(keyword in normalized for keyword in keywords)
+    row_issues: dict[object, set[str]] = {}
+    validation_errors: list[dict[str, object]] = []
 
-    def _is_name_like_column(column_name: str) -> bool:
-        normalized = column_name.lower()
-        return _column_matches_keywords(normalized, name_like_keywords) and not _column_matches_keywords(
-            normalized, no_title_case_keywords
-        )
+    rows_dropped = {
+        "all_null": 0,
+        "critical_missing": 0,
+        "required_threshold": 0,
+        "total": 0,
+    }
+    flagged_counts = {
+        "missing_required": 0,
+        "duplicate_primary_key": 0,
+        "validation": 0,
+        "conversion": 0,
+    }
 
-    def _normalize_text_series(series: pd.Series) -> pd.Series:
-        normalized = series.astype("string").str.strip().str.replace(r"\s+", " ", regex=True)
-        normalized = normalized.mask(normalized.str.lower().isin(placeholder_null_tokens), pd.NA)
-        return normalized
+    def _flag_rows(mask: pd.Series, issue: str, column: str | None = None) -> int:
+        flagged_indexes = list(mask[mask].index)
+        for row_index in flagged_indexes:
+            row_issues.setdefault(row_index, set()).add(issue if column is None else f"{column}: {issue}")
+        return len(flagged_indexes)
 
-    def _sanitize_numeric_strings(series: pd.Series) -> pd.Series:
-        return (
-            series.astype("string")
-            .str.replace(",", "", regex=False)
-            .str.replace(r"[\$€£₱]", "", regex=True)
-            .str.replace(r"\s+", "", regex=True)
-        )
+    def _add_validation_error(column: str, issue: str, rows: int) -> None:
+        if rows > 0:
+            validation_errors.append({"column": column, "issue": issue, "rows": int(rows)})
 
-    def _is_sequential_datetime(series: pd.Series) -> bool:
-        non_null = series.dropna()
-        if len(non_null) < 3:
-            return False
-        return bool(non_null.is_monotonic_increasing)
+    def _is_protected_text_column(column_name: str) -> bool:
+        return _column_matches_keywords(column_name, protected_keywords)
+
+    def _is_title_case_column(column_name: str) -> bool:
+        return _column_matches_keywords(column_name, name_label_keywords) and not _is_protected_text_column(column_name)
 
     cleaned_df = cleaned_df.replace([np.inf, -np.inf], np.nan)
 
+    # Rule 1: normalize only explicit placeholder tokens into nulls.
+    nulls_normalized = 0
     standardized_text_columns: list[str] = []
-    object_like_columns = list(cleaned_df.select_dtypes(include=["object", "string"]).columns)
-    for column in object_like_columns:
-        column_name = str(column)
+    for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
         original_series = cleaned_df[column].astype("string")
-        normalized_series = _normalize_text_series(cleaned_df[column])
+        normalized_series = original_series.str.strip().str.replace(r"\s+", " ", regex=True)
+        placeholder_mask = normalized_series.fillna("").str.lower().isin(placeholder_tokens)
+        normalized_series = normalized_series.mask(placeholder_mask, pd.NA)
 
-        if _is_name_like_column(column_name):
+        if _is_title_case_column(str(column)):
             normalized_series = normalized_series.str.title()
 
+        nulls_normalized += max(int(normalized_series.isna().sum()) - int(original_series.isna().sum()), 0)
         if not original_series.equals(normalized_series):
-            standardized_text_columns.append(column_name)
+            standardized_text_columns.append(str(column))
 
         cleaned_df[column] = normalized_series
 
     converted_columns: list[dict[str, str]] = []
 
+    # Rule 3: convert trusted date-like columns, coercing unparseable values to null and flagging them.
     for column in list(cleaned_df.columns):
         column_name = str(column)
         if not _column_matches_keywords(column_name, date_keywords):
@@ -314,48 +413,151 @@ def _clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]
 
         converted_series = pd.to_datetime(cleaned_df[column], errors="coerce")
         parse_ratio = float(converted_series.notna().sum()) / float(source_non_null)
-        if parse_ratio <= 0.5:
+        if parse_ratio < float(cleaning_config["datetime_parse_ratio"]):
             continue
 
-        cleaned_df[column] = converted_series
-        converted_columns.append(
-            {"column": column_name, "to_type": "datetime", "new_dtype": str(cleaned_df[column].dtype)}
-        )
+        failed_mask = cleaned_df[column].notna() & converted_series.isna()
+        failed_rows = _flag_rows(failed_mask, "invalid datetime nullified", column_name)
+        flagged_counts["conversion"] += failed_rows
+        _add_validation_error(column_name, "invalid datetime values were nullified", failed_rows)
 
-    object_like_columns = list(cleaned_df.select_dtypes(include=["object", "string"]).columns)
-    for column in object_like_columns:
+        cleaned_df[column] = converted_series
+        converted_columns.append({"column": column_name, "to_type": "datetime", "new_dtype": str(cleaned_df[column].dtype)})
+
+    # Rule 3: convert numeric-like text only when most non-null values parse safely.
+    for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
         column_name = str(column)
+        if _is_protected_text_column(column_name):
+            continue
+
         non_null_values = cleaned_df[column].dropna()
         if non_null_values.empty:
             continue
 
-        sanitized_non_null = _sanitize_numeric_strings(non_null_values)
-        parsed_non_null = pd.to_numeric(sanitized_non_null, errors="coerce")
-        numeric_like_ratio = float(parsed_non_null.notna().sum()) / float(len(non_null_values))
-        if numeric_like_ratio <= 0.5:
+        sanitized_values = _sanitize_numeric_strings(non_null_values)
+        parsed_values = pd.to_numeric(sanitized_values, errors="coerce")
+        numeric_like_ratio = float(parsed_values.notna().sum()) / float(len(non_null_values))
+        if numeric_like_ratio < float(cleaning_config["numeric_like_ratio"]):
             continue
 
-        cleaned_df[column] = pd.to_numeric(_sanitize_numeric_strings(cleaned_df[column]), errors="coerce")
-        converted_columns.append(
-            {"column": column_name, "to_type": "numeric", "new_dtype": str(cleaned_df[column].dtype)}
-        )
+        sanitized_series = _sanitize_numeric_strings(cleaned_df[column])
+        converted_series = pd.to_numeric(sanitized_series, errors="coerce")
+        failed_mask = cleaned_df[column].notna() & converted_series.isna()
+        failed_rows = _flag_rows(failed_mask, "invalid numeric nullified", column_name)
+        flagged_counts["conversion"] += failed_rows
+        _add_validation_error(column_name, "invalid numeric values were nullified", failed_rows)
 
-    invalid_row_mask = cleaned_df.isna().all(axis=1)
-    invalid_rows_removed = int(invalid_row_mask.sum())
-    if invalid_rows_removed > 0:
-        cleaned_df = cleaned_df.loc[~invalid_row_mask].copy()
+        cleaned_df[column] = converted_series
+        converted_columns.append({"column": column_name, "to_type": "numeric", "new_dtype": str(cleaned_df[column].dtype)})
 
+    # Rule 7: validate emails by format, then nullify invalid values instead of correcting them.
+    for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), ("email",))]:
+        values = cleaned_df[column].dropna().astype("string")
+        if values.empty:
+            continue
+
+        valid_mask = values.str.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", na=False)
+        invalid_indexes = values.index[~valid_mask]
+        if len(invalid_indexes) > 0:
+            mask = cleaned_df.index.isin(invalid_indexes)
+            invalid_rows = _flag_rows(pd.Series(mask, index=cleaned_df.index), "invalid email nullified", str(column))
+            flagged_counts["validation"] += invalid_rows
+            _add_validation_error(str(column), "invalid email values were nullified", invalid_rows)
+            cleaned_df.loc[invalid_indexes, column] = pd.NA
+
+    # Rule 7: enforce configured numeric ranges such as age >= 0.
+    numeric_range_rules = cleaning_config["numeric_range_rules"]  # type: ignore[index]
+    if isinstance(numeric_range_rules, dict):
+        for rule_keyword, rule in numeric_range_rules.items():
+            if not isinstance(rule, dict):
+                continue
+            for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), (str(rule_keyword),))]:
+                if not pd.api.types.is_numeric_dtype(cleaned_df[column]):
+                    continue
+                invalid_mask = pd.Series(False, index=cleaned_df.index)
+                if "min" in rule:
+                    invalid_mask = invalid_mask | (cleaned_df[column] < rule["min"])
+                if "max" in rule:
+                    invalid_mask = invalid_mask | (cleaned_df[column] > rule["max"])
+                invalid_mask = invalid_mask.fillna(False)
+                invalid_rows = _flag_rows(invalid_mask, "numeric range violation nullified", str(column))
+                if invalid_rows > 0:
+                    flagged_counts["validation"] += invalid_rows
+                    _add_validation_error(str(column), "numeric range violations were nullified", invalid_rows)
+                    cleaned_df.loc[invalid_mask, column] = np.nan
+
+    # Rule 7: do not allow future birthdates; flag and nullify instead.
+    today = pd.Timestamp(datetime.now(timezone.utc).date())
+    for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), future_date_keywords)]:
+        if not pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
+            continue
+        invalid_mask = (cleaned_df[column] > today).fillna(False)
+        invalid_rows = _flag_rows(invalid_mask, "future date nullified", str(column))
+        if invalid_rows > 0:
+            flagged_counts["validation"] += invalid_rows
+            _add_validation_error(str(column), "future date values were nullified", invalid_rows)
+            cleaned_df.loc[invalid_mask, column] = pd.NaT
+
+    # Rule 6: remove rows with no usable data.
+    all_null_mask = cleaned_df.isna().all(axis=1)
+    rows_dropped["all_null"] = int(all_null_mask.sum())
+    if rows_dropped["all_null"] > 0:
+        cleaned_df = cleaned_df.loc[~all_null_mask].copy()
+
+    # Rule 4: remove fully duplicated rows only.
     rows_before_deduplication = int(cleaned_df.shape[0])
-    cleaned_df = cleaned_df.drop_duplicates().reset_index(drop=True)
+    cleaned_df = cleaned_df.drop_duplicates()
     duplicates_removed = rows_before_deduplication - int(cleaned_df.shape[0])
 
+    # Rule 4: duplicate primary keys are flagged, not deleted.
+    key_columns = [
+        column
+        for column in cleaned_df.columns
+        if _column_matches_keywords(str(column), ("id", "email", "username", "primary_key", "primarykey"))
+    ]
+    duplicate_key_columns: list[str] = []
+    duplicate_key_row_indexes: set[object] = set()
+    for column in key_columns:
+        duplicate_mask = cleaned_df[column].notna() & cleaned_df[column].duplicated(keep=False)
+        duplicate_rows = _flag_rows(duplicate_mask, "duplicate primary key flagged", str(column))
+        if duplicate_rows > 0:
+            flagged_counts["duplicate_primary_key"] += duplicate_rows
+            duplicate_key_columns.append(str(column))
+            duplicate_key_row_indexes.update(duplicate_mask[duplicate_mask].index)
+
+    required_columns = [column for column in cleaned_df.columns if _column_matches_keywords(str(column), required_keywords)]
+    missing_required_row_indexes: set[object] = set()
+    if required_columns:
+        required_missing_mask = cleaned_df[required_columns].isna()
+        missing_required_mask = required_missing_mask.any(axis=1)
+        flagged_counts["missing_required"] = _flag_rows(missing_required_mask, "required field missing", None)
+        missing_required_row_indexes.update(missing_required_mask[missing_required_mask].index)
+
+        threshold = cleaning_config.get("required_missing_drop_threshold")
+        if isinstance(threshold, (int, float)) and 0 < float(threshold) <= 1:
+            missing_ratio = required_missing_mask.sum(axis=1) / max(len(required_columns), 1)
+            threshold_drop_mask = missing_ratio > float(threshold)
+            rows_dropped["required_threshold"] = int(threshold_drop_mask.sum())
+            if rows_dropped["required_threshold"] > 0:
+                cleaned_df = cleaned_df.loc[~threshold_drop_mask].copy()
+
+    # Rule 2: critical rows are dropped only when trusted identifiers are missing.
+    critical_columns = [column for column in cleaned_df.columns if _column_matches_keywords(str(column), critical_keywords)]
+    if critical_columns:
+        critical_missing_mask = cleaned_df[critical_columns].isna().any(axis=1)
+        rows_dropped["critical_missing"] = int(critical_missing_mask.sum())
+        if rows_dropped["critical_missing"] > 0:
+            cleaned_df = cleaned_df.loc[~critical_missing_mask].copy()
+
+    # Rule 2: fill numeric gaps deterministically; choose median for skew/outliers, otherwise mean.
     filled_numeric_mean = 0
     filled_numeric_median = 0
-    filled_text_mode = 0
-    filled_datetime_ffill = 0
+    filled_numeric_columns: list[dict[str, object]] = []
+    for column in list(cleaned_df.select_dtypes(include=["number"]).columns):
+        column_name = str(column)
+        if _is_protected_text_column(column_name) or pd.api.types.is_bool_dtype(cleaned_df[column]):
+            continue
 
-    numeric_columns = list(cleaned_df.select_dtypes(include=["number"]).columns)
-    for column in numeric_columns:
         missing_before_fill = int(cleaned_df[column].isna().sum())
         if missing_before_fill == 0:
             continue
@@ -365,50 +567,115 @@ def _clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]
             continue
 
         skew_value = non_null_series.skew()
-        use_median = bool(pd.notna(skew_value) and abs(float(skew_value)) > 1.0)
+        use_median = bool(pd.notna(skew_value) and abs(float(skew_value)) > float(cleaning_config["numeric_skew_threshold"]))
         fill_value = non_null_series.median() if use_median else non_null_series.mean()
         if pd.isna(fill_value):
             continue
 
         cleaned_df[column] = cleaned_df[column].fillna(fill_value)
         filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+        method = "median" if use_median else "mean"
+        filled_numeric_columns.append({"column": column_name, "method": method, "filled": int(filled_count)})
         if use_median:
             filled_numeric_median += filled_count
         else:
             filled_numeric_mean += filled_count
 
-    datetime_columns = list(cleaned_df.select_dtypes(include=["datetime", "datetimetz"]).columns)
-    for column in datetime_columns:
-        missing_before_fill = int(cleaned_df[column].isna().sum())
-        if missing_before_fill == 0:
+    # Rule 2: only forward-fill datetimes when the column is clearly sequential.
+    filled_datetime_ffill = 0
+    filled_datetime_columns: list[dict[str, object]] = []
+    for column in list(cleaned_df.select_dtypes(include=["datetime", "datetimetz"]).columns):
+        column_name = str(column)
+        if _column_matches_keywords(column_name, future_date_keywords):
             continue
-        if not _is_sequential_datetime(cleaned_df[column]):
+        missing_before_fill = int(cleaned_df[column].isna().sum())
+        if missing_before_fill == 0 or not _is_sequential_datetime(cleaned_df[column]):
             continue
 
         cleaned_df[column] = cleaned_df[column].ffill()
-        filled_datetime_ffill += max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+        filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+        filled_datetime_ffill += filled_count
+        filled_datetime_columns.append({"column": column_name, "method": "forward_fill", "filled": int(filled_count)})
 
-    text_columns = list(cleaned_df.select_dtypes(include=["object", "string"]).columns)
-    for column in text_columns:
-        missing_before_fill = int(cleaned_df[column].isna().sum())
-        if missing_before_fill == 0:
-            continue
+    # Rule 2: text mode filling is off by default to avoid fabricating human-entered data.
+    filled_text_mode = 0
+    filled_text_columns: list[dict[str, object]] = []
+    if bool(cleaning_config["fill_text_with_mode"]):
+        for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
+            if _is_protected_text_column(str(column)):
+                continue
+            missing_before_fill = int(cleaned_df[column].isna().sum())
+            if missing_before_fill == 0:
+                continue
 
-        mode_values = cleaned_df[column].mode(dropna=True)
-        if mode_values.empty:
-            continue
+            mode_values = cleaned_df[column].mode(dropna=True)
+            if mode_values.empty:
+                continue
 
-        cleaned_df[column] = cleaned_df[column].fillna(mode_values.iloc[0])
-        filled_text_mode += max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+            cleaned_df[column] = cleaned_df[column].fillna(mode_values.iloc[0])
+            filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+            filled_text_mode += filled_count
+            filled_text_columns.append({"column": str(column), "method": "mode", "filled": int(filled_count)})
+
+    existing_indexes = set(cleaned_df.index)
+    flagged_row_indexes = {index for index, issues in row_issues.items() if issues and index in existing_indexes}
+    if flagged_row_indexes:
+        cleaned_df["_atlas_flags"] = [
+            "; ".join(sorted(row_issues.get(row_index, set()))) or None for row_index in cleaned_df.index
+        ]
+        cleaned_df["_atlas_has_flag"] = [row_index in flagged_row_indexes for row_index in cleaned_df.index]
+        cleaned_df["_atlas_missing_required_flag"] = [
+            row_index in missing_required_row_indexes for row_index in cleaned_df.index
+        ]
+        cleaned_df["_atlas_duplicate_primary_key_flag"] = [
+            row_index in duplicate_key_row_indexes for row_index in cleaned_df.index
+        ]
 
     missing_after = int(cleaned_df.isna().sum().sum())
+    rows_dropped["total"] = int(rows_dropped["all_null"] + rows_dropped["critical_missing"] + rows_dropped["required_threshold"])
     total_filled = filled_numeric_mean + filled_numeric_median + filled_text_mode + filled_datetime_ffill
+
+    audit_log = {
+        "nulls_normalized": int(nulls_normalized),
+        "rows_dropped": rows_dropped,
+        "duplicates_removed": int(duplicates_removed),
+        "filled_numeric_values": {
+            "mean": int(filled_numeric_mean),
+            "median": int(filled_numeric_median),
+            "total": int(filled_numeric_mean + filled_numeric_median),
+            "columns": filled_numeric_columns,
+        },
+        "filled_text_values": {
+            "mode": int(filled_text_mode),
+            "total": int(filled_text_mode),
+            "columns": filled_text_columns,
+            "policy": "mode fill enabled" if bool(cleaning_config["fill_text_with_mode"]) else "preserve nulls by default",
+        },
+        "filled_datetime_values": {
+            "forward_fill": int(filled_datetime_ffill),
+            "columns": filled_datetime_columns,
+        },
+        "converted_columns": converted_columns,
+        "flagged_rows": {
+            "total": int(len(flagged_row_indexes)),
+            "missing_required": int(flagged_counts["missing_required"]),
+            "duplicate_primary_key": int(flagged_counts["duplicate_primary_key"]),
+            "validation": int(flagged_counts["validation"]),
+            "conversion": int(flagged_counts["conversion"]),
+        },
+        "validation_errors": validation_errors,
+        "config": {
+            "fill_text_with_mode": bool(cleaning_config["fill_text_with_mode"]),
+            "required_missing_drop_threshold": cleaning_config["required_missing_drop_threshold"],
+            "numeric_skew_threshold": cleaning_config["numeric_skew_threshold"],
+        },
+    }
 
     summary = {
         "rows_before": rows_before,
         "rows_after": int(cleaned_df.shape[0]),
-        "duplicates_removed": duplicates_removed,
-        "invalid_rows_removed": invalid_rows_removed,
+        "duplicates_removed": int(duplicates_removed),
+        "invalid_rows_removed": int(rows_dropped["total"]),
         "missing_values_before": missing_before,
         "missing_values_after": missing_after,
         "missing_values_filled": int(total_filled),
@@ -417,13 +684,18 @@ def _clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]
         "filled_text_mode": int(filled_text_mode),
         "filled_datetime_ffill": int(filled_datetime_ffill),
         "converted_columns": converted_columns,
-        "date_columns_converted": [
-            item["column"] for item in converted_columns if item["to_type"] == "datetime"
-        ],
-        "numeric_columns_converted": [
-            item["column"] for item in converted_columns if item["to_type"] == "numeric"
-        ],
+        "date_columns_converted": [item["column"] for item in converted_columns if item["to_type"] == "datetime"],
+        "numeric_columns_converted": [item["column"] for item in converted_columns if item["to_type"] == "numeric"],
         "text_columns_standardized": standardized_text_columns,
+        "nulls_normalized": int(nulls_normalized),
+        "rows_dropped": rows_dropped,
+        "filled_numeric_values": audit_log["filled_numeric_values"],
+        "filled_text_values": audit_log["filled_text_values"],
+        "flagged_rows": audit_log["flagged_rows"],
+        "validation_errors": validation_errors,
+        "audit_log": audit_log,
+        "duplicate_primary_key_columns": duplicate_key_columns,
+        "data_integrity_policy": "Unknown human-entered values are preserved as null and flagged instead of guessed.",
     }
     return cleaned_df, summary
 
@@ -570,6 +842,272 @@ def _build_visualization_payload(df: pd.DataFrame) -> dict[str, object]:
     }
 
 
+def _safe_compare_value(value: object) -> object:
+    safe_value = _json_safe(value)
+    if isinstance(safe_value, float):
+        return round(safe_value, 8)
+    return safe_value
+
+
+def _values_match(left: object, right: object) -> bool:
+    return _safe_compare_value(left) == _safe_compare_value(right)
+
+
+def _row_to_safe_dict(df: pd.DataFrame, row_label: object, columns: list[str]) -> dict[str, object]:
+    if row_label not in df.index:
+        return {}
+
+    row = df.loc[row_label]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[0]
+
+    return {column: _json_safe(row[column]) if column in row.index else None for column in columns}
+
+
+def _build_comparison(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, limit: int = 40) -> dict[str, object]:
+    columns = list(dict.fromkeys([*list(raw_df.columns), *list(cleaned_df.columns)]))
+    row_labels = list(dict.fromkeys([*list(raw_df.index), *list(cleaned_df.index)]))
+    preview_limit = min(limit, len(row_labels))
+
+    rows: list[dict[str, object]] = []
+    changed_rows = 0
+    changed_cells = 0
+
+    for row_label in row_labels[:preview_limit]:
+        raw_present = row_label in raw_df.index
+        cleaned_present = row_label in cleaned_df.index
+        raw_row = _row_to_safe_dict(raw_df, row_label, columns)
+        cleaned_row = _row_to_safe_dict(cleaned_df, row_label, columns)
+
+        changed_columns = [
+            column
+            for column in columns
+            if not _values_match(raw_row.get(column), cleaned_row.get(column))
+        ]
+
+        if changed_columns:
+            changed_rows += 1
+            changed_cells += len(changed_columns)
+
+        if raw_present and not cleaned_present:
+            status = "removed"
+        elif cleaned_present and not raw_present:
+            status = "added"
+        elif changed_columns:
+            status = "changed"
+        else:
+            status = "unchanged"
+
+        rows.append(
+            {
+                "row_number": int(row_label) + 1 if isinstance(row_label, (int, np.integer)) else str(row_label),
+                "status": status,
+                "raw": raw_row,
+                "cleaned": cleaned_row,
+                "changed_columns": changed_columns,
+            }
+        )
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "summary": {
+            "raw_rows": int(raw_df.shape[0]),
+            "cleaned_rows": int(cleaned_df.shape[0]),
+            "raw_columns": int(raw_df.shape[1]),
+            "cleaned_columns": int(cleaned_df.shape[1]),
+            "preview_rows": preview_limit,
+            "preview_changed_rows": changed_rows,
+            "preview_changed_cells": changed_cells,
+            "rows_removed": max(int(raw_df.shape[0]) - int(cleaned_df.shape[0]), 0),
+        },
+    }
+
+
+def _get_chart_options(df: pd.DataFrame) -> dict[str, object]:
+    numeric_columns = list(df.select_dtypes(include=["number"]).columns)
+    datetime_columns = list(df.select_dtypes(include=["datetime", "datetimetz"]).columns)
+    categorical_columns = list(
+        df.select_dtypes(exclude=["number", "datetime", "datetimetz"]).columns
+    )
+
+    return {
+        "columns": list(df.columns),
+        "numeric_columns": numeric_columns,
+        "categorical_columns": categorical_columns,
+        "datetime_columns": datetime_columns,
+    }
+
+
+def _resolve_dimension(df: pd.DataFrame, dimension: str | None) -> str | None:
+    if dimension and dimension in df.columns:
+        return dimension
+
+    options = _get_chart_options(df)
+    for group in ("categorical_columns", "datetime_columns", "columns"):
+        values = options[group]
+        if isinstance(values, list) and values:
+            return str(values[0])
+
+    return None
+
+
+def _resolve_measure(df: pd.DataFrame, measure: str | None) -> str | None:
+    if measure and measure in df.columns and pd.api.types.is_numeric_dtype(df[measure]):
+        return measure
+
+    numeric_columns = list(df.select_dtypes(include=["number"]).columns)
+    return numeric_columns[0] if numeric_columns else None
+
+
+def _aggregate_series(series: pd.Series, aggregation: str) -> object:
+    normalized = aggregation.lower().strip()
+    if normalized == "sum":
+        return series.sum()
+    if normalized == "mean":
+        return series.mean()
+    if normalized == "median":
+        return series.median()
+    if normalized == "min":
+        return series.min()
+    if normalized == "max":
+        return series.max()
+    return series.count()
+
+
+def _build_selectable_chart(
+    df: pd.DataFrame,
+    chart_type: str,
+    dimension: str | None,
+    measure: str | None,
+    aggregation: str,
+) -> dict[str, object]:
+    normalized_chart_type = chart_type.lower().strip()
+    if normalized_chart_type not in {"bar", "line", "pie"}:
+        raise HTTPException(status_code=400, detail="Invalid chart_type. Use bar, line, or pie")
+
+    normalized_aggregation = aggregation.lower().strip()
+    if normalized_aggregation not in {"count", "sum", "mean", "median", "min", "max"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid aggregation. Use count, sum, mean, median, min, or max",
+        )
+
+    resolved_dimension = _resolve_dimension(df, dimension)
+    resolved_measure = _resolve_measure(df, measure)
+
+    if resolved_dimension is None:
+        return {
+            "chart_type": normalized_chart_type,
+            "dimension": None,
+            "measure": None,
+            "aggregation": normalized_aggregation,
+            "data": [],
+            "interpretation": "No columns are available for visualization.",
+            "options": _get_chart_options(df),
+        }
+
+    if normalized_aggregation != "count" and resolved_measure is None:
+        normalized_aggregation = "count"
+
+    if normalized_chart_type == "line" and resolved_measure is not None:
+        if resolved_dimension and resolved_dimension in df.columns:
+            working = df[[resolved_dimension, resolved_measure]].copy()
+            working = working.dropna(subset=[resolved_dimension, resolved_measure])
+            if pd.api.types.is_datetime64_any_dtype(working[resolved_dimension]):
+                grouped = working.groupby(working[resolved_dimension].dt.date)[resolved_measure].agg(
+                    lambda values: _aggregate_series(values, normalized_aggregation)
+                )
+            else:
+                grouped = working.groupby(resolved_dimension)[resolved_measure].agg(
+                    lambda values: _aggregate_series(values, normalized_aggregation)
+                )
+            grouped = grouped.sort_index().head(40)
+        else:
+            values = df[resolved_measure].dropna().head(40)
+            grouped = pd.Series(values.values, index=range(1, len(values) + 1))
+    elif normalized_aggregation == "count" or resolved_measure is None:
+        labels = df[resolved_dimension].fillna("Missing").astype(str)
+        grouped = labels.value_counts().head(12)
+    else:
+        working = df[[resolved_dimension, resolved_measure]].copy()
+        working[resolved_dimension] = working[resolved_dimension].fillna("Missing").astype(str)
+        working[resolved_measure] = pd.to_numeric(working[resolved_measure], errors="coerce")
+        working = working.dropna(subset=[resolved_measure])
+        grouped = (
+            working.groupby(resolved_dimension)[resolved_measure]
+            .agg(lambda values: _aggregate_series(values, normalized_aggregation))
+            .sort_values(ascending=False)
+            .head(12)
+        )
+
+    data = [
+        {"label": str(label), "value": _round_or_none(value, 2)}
+        for label, value in grouped.items()
+        if _round_or_none(value, 2) is not None
+    ]
+
+    metric_label = "records" if normalized_aggregation == "count" or not resolved_measure else resolved_measure
+    interpretation = (
+        f"{normalized_chart_type.title()} chart grouped by {resolved_dimension} "
+        f"using {normalized_aggregation} of {metric_label}."
+    )
+
+    return {
+        "chart_type": normalized_chart_type,
+        "dimension": resolved_dimension,
+        "measure": resolved_measure,
+        "aggregation": normalized_aggregation,
+        "x_label": resolved_dimension,
+        "y_label": metric_label,
+        "data": data,
+        "interpretation": interpretation,
+        "options": _get_chart_options(df),
+    }
+
+
+def _build_updated_dataframe(
+    columns: list[str],
+    rows: list[dict[str, object]],
+    previous_df: pd.DataFrame,
+) -> pd.DataFrame:
+    normalized_columns = [str(column) for column in columns]
+    normalized_rows: list[dict[str, object]] = []
+
+    for row in rows:
+        normalized_rows.append(
+            {
+                column: None if row.get(column) == "" else row.get(column)
+                for column in normalized_columns
+            }
+        )
+
+    updated_df = pd.DataFrame(normalized_rows, columns=normalized_columns)
+
+    for column in normalized_columns:
+        if column not in previous_df.columns:
+            continue
+
+        previous_series = previous_df[column]
+        updated_series = updated_df[column]
+        non_null_count = int(updated_series.notna().sum())
+        if non_null_count == 0:
+            continue
+
+        if pd.api.types.is_numeric_dtype(previous_series):
+            parsed = pd.to_numeric(updated_series, errors="coerce")
+            if float(parsed.notna().sum()) / float(non_null_count) >= 0.8:
+                updated_df[column] = parsed
+            continue
+
+        if pd.api.types.is_datetime64_any_dtype(previous_series):
+            parsed = pd.to_datetime(updated_series, errors="coerce")
+            if float(parsed.notna().sum()) / float(non_null_count) >= 0.8:
+                updated_df[column] = parsed
+
+    return updated_df
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)) -> dict[str, object]:
     extension = _validate_upload_file(file)
@@ -674,6 +1212,35 @@ def get_dataset_state(
     }
 
 
+@app.put("/datasets/{dataset_id}/raw")
+def update_raw_dataset(dataset_id: str, payload: DatasetUpdatePayload) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    raw_df = dataset.get("raw")
+    if not isinstance(raw_df, pd.DataFrame):
+        raise HTTPException(status_code=500, detail="Dataset state is invalid")
+
+    if len(set(payload.columns)) != len(payload.columns):
+        raise HTTPException(status_code=400, detail="Column names must be unique")
+
+    updated_df = _build_updated_dataframe(payload.columns, payload.rows, raw_df)
+    dataset["raw"] = updated_df
+    dataset["cleaned"] = None
+    dataset["cleaning_summary"] = None
+
+    full_dataset = _build_full_dataset(updated_df)
+
+    return {
+        "dataset_id": dataset_id,
+        "stage": "raw",
+        "columns": full_dataset["columns"],
+        "rows": full_dataset["rows"],
+        "total_rows": full_dataset["total_rows"],
+        "total_columns": full_dataset["total_columns"],
+        "approx_size_bytes": _estimate_dataframe_size_bytes(updated_df),
+        "profile": _build_profile(updated_df, preview_limit=20),
+    }
+
+
 @app.post("/datasets/{dataset_id}/clean")
 def clean_dataset(dataset_id: str) -> dict[str, object]:
     dataset = _get_dataset(dataset_id)
@@ -684,75 +1251,6 @@ def clean_dataset(dataset_id: str) -> dict[str, object]:
     cleaned_df, summary = _clean_dataframe(raw_df)
     dataset["cleaned"] = cleaned_df
     dataset["cleaning_summary"] = summary
-
-    PLACEHOLDER_NULL_TOKENS = {
-        "",
-        " ",
-        "-",
-        "--",
-        "n/a",
-        "null",
-        "none",
-        "unknown",
-    }
-
-    CRITICAL_IDENTIFIER_KEYWORDS = (
-        "id",
-        "email",
-        "primary_key",
-        "primarykey",
-        "username",
-        "user_name",
-    )
-
-    REQUIRED_BUSINESS_KEYWORDS = (
-        "last_name",
-        "lastname",
-        "surname",
-        "department",
-        "program",
-    )
-
-    NAME_LIKE_KEYWORDS = ("name", "city", "department")
-    NO_TITLE_CASE_KEYWORDS = ("email", "username", "id", "code", "acronym")
-    DATE_KEYWORDS = ("date", "time", "created", "updated", "timestamp", "at")
-    SEMANTIC_NULL_TEXT_KEYWORDS = ("middle", "suffix", "notes", "remark", "comment", "description")
-
-
-    def _normalize_text_series(series: pd.Series) -> pd.Series:
-        normalized = series.astype("string").str.strip().str.replace(r"\s+", " ", regex=True)
-        normalized = normalized.mask(normalized.str.lower().isin(PLACEHOLDER_NULL_TOKENS), pd.NA)
-        return normalized
-
-
-    def _column_matches_keywords(column_name: str, keywords: tuple[str, ...]) -> bool:
-        normalized = column_name.lower()
-        return any(keyword in normalized for keyword in keywords)
-
-
-    def _is_name_like_column(column_name: str) -> bool:
-        normalized = column_name.lower()
-        return _column_matches_keywords(normalized, NAME_LIKE_KEYWORDS) and not _column_matches_keywords(
-            normalized, NO_TITLE_CASE_KEYWORDS
-        )
-
-
-    def _is_sequential_datetime(series: pd.Series) -> bool:
-        non_null = series.dropna()
-        if len(non_null) < 3:
-            return False
-        return bool(non_null.is_monotonic_increasing)
-
-
-    def _sanitize_numeric_strings(series: pd.Series) -> pd.Series:
-        return (
-            series.astype("string")
-            .str.replace(",", "", regex=False)
-            .str.replace(r"[\$€£₱]", "", regex=True)
-            .str.replace(r"\s+", "", regex=True)
-        )
-
-
 
     return {
         "dataset_id": dataset_id,
@@ -782,4 +1280,51 @@ def visualize_dataset(dataset_id: str, stage: str = "latest") -> dict[str, objec
         "dataset_id": dataset_id,
         "stage": resolved_stage,
         "charts": _build_visualization_payload(df),
+        "options": _get_chart_options(df),
+    }
+
+
+@app.get("/datasets/{dataset_id}/compare")
+def compare_dataset(
+    dataset_id: str,
+    limit: int = Query(default=40, ge=1, le=200),
+) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    raw_df = dataset.get("raw")
+    cleaned_df = dataset.get("cleaned")
+
+    if not isinstance(raw_df, pd.DataFrame):
+        raise HTTPException(status_code=500, detail="Dataset state is invalid")
+
+    if not isinstance(cleaned_df, pd.DataFrame):
+        raise HTTPException(status_code=400, detail="Dataset has not been cleaned yet")
+
+    return {
+        "dataset_id": dataset_id,
+        "comparison": _build_comparison(raw_df, cleaned_df, limit=limit),
+    }
+
+
+@app.get("/datasets/{dataset_id}/chart")
+def build_dataset_chart(
+    dataset_id: str,
+    chart_type: str = Query(default="bar"),
+    stage: str = "latest",
+    dimension: str | None = None,
+    measure: str | None = None,
+    aggregation: str = "count",
+) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    df, resolved_stage = _select_dataframe(dataset, stage)
+
+    return {
+        "dataset_id": dataset_id,
+        "stage": resolved_stage,
+        "chart": _build_selectable_chart(
+            df,
+            chart_type=chart_type,
+            dimension=dimension,
+            measure=measure,
+            aggregation=aggregation,
+        ),
     }

@@ -1,19 +1,18 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
-import Sidebar from './components/Sidebar'
 import TopNavigation from './components/TopNavigation'
 import { AtlasProvider } from './context/AtlasContext'
 import AnalysisPage from './pages/AnalysisPage'
-import DashboardPage from './pages/DashboardPage'
+import CleaningPage from './pages/CleaningPage'
+import ProfilingPage from './pages/ProfilingPage'
 import ReportsPage from './pages/ReportsPage'
 import UploadPage from './pages/UploadPage'
+import VisualizationPage from './pages/VisualizationPage'
 import './App.css'
 
 function App() {
   return (
     <AtlasProvider>
       <div className="app-shell">
-        <Sidebar />
-
         <div className="app-content">
           <TopNavigation />
 
@@ -21,15 +20,15 @@ function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/dataset" replace />} />
               <Route path="/dataset" element={<UploadPage />} />
-              <Route path="/dashboard-builder" element={<DashboardPage />} />
-              <Route path="/insights" element={<AnalysisPage />} />
+              <Route path="/profiling" element={<ProfilingPage />} />
+              <Route path="/cleaning" element={<CleaningPage />} />
+              <Route path="/analysis" element={<AnalysisPage />} />
+              <Route path="/visualization" element={<VisualizationPage />} />
               <Route path="/reports" element={<ReportsPage />} />
 
               <Route path="/upload" element={<Navigate to="/dataset" replace />} />
-              <Route path="/profiling" element={<Navigate to="/dataset" replace />} />
-              <Route path="/cleaning" element={<Navigate to="/dataset" replace />} />
-              <Route path="/analysis" element={<Navigate to="/insights" replace />} />
-              <Route path="/visualization" element={<Navigate to="/dashboard-builder" replace />} />
+              <Route path="/insights" element={<Navigate to="/analysis" replace />} />
+              <Route path="/dashboard-builder" element={<Navigate to="/visualization" replace />} />
 
               <Route path="*" element={<Navigate to="/dataset" replace />} />
             </Routes>

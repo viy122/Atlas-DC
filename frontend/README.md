@@ -1,16 +1,52 @@
-# React + Vite
+# ATLAS Data Cleaning and Analytics System
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+ATLAS is a mini Power BI-style workflow for uploading raw tabular data, profiling quality, cleaning common issues, generating insights, and building simple charts.
 
-Currently, two official plugins are available:
+## Workflow
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Upload: import a CSV, XLSX, or XLS file and preview the raw table.
+2. Profile: review row and column counts, inferred data types, missing values, unique values, and basic numeric statistics.
+3. Clean: run the automatic cleaning process and review the transformation summary.
+4. Compare: inspect original vs cleaned values with changed cells highlighted.
+5. Analyze: read summary statistics, frequent values, correlations, trends, and simple interpretations.
+6. Visualize: choose chart type, dimension, measure, and aggregation for bar, line, or pie charts.
 
-## React Compiler
+## Cleaning Methods
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Missing text placeholders such as blank values, `n/a`, `null`, `none`, and `unknown` are standardized.
+- Duplicate rows are removed.
+- Empty rows are filtered out.
+- Numeric-looking text is converted into numeric columns where possible.
+- Date-like columns are converted into datetime columns where possible.
+- Numeric missing values are filled with mean or median depending on skew.
+- Text missing values are filled with the most frequent value.
+- Sequential datetime gaps are forward-filled when appropriate.
 
-## Expanding the ESLint configuration
+## Sample Dataset
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Use `public/sample_sales_dataset.csv` to test the complete workflow. It intentionally includes missing values, duplicate rows, inconsistent text casing, numeric strings, and placeholder null values.
+
+## Screenshots To Include In The Final Report
+
+- Upload page after importing the sample dataset.
+- Profile page showing data types and missing values.
+- Cleaning page showing the original-vs-cleaned comparison.
+- Analysis page showing generated insights.
+- Visualization page showing a selected bar, line, or pie chart.
+
+## Local Development
+
+Start the backend from the repository root:
+
+```bash
+cd backend
+uvicorn main:app --reload --port 8000
+```
+
+Start the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```

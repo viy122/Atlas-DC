@@ -1,18 +1,49 @@
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import DataTable from '../components/DataTable'
-import MetricCard from '../components/MetricCard'
 import { useAtlas } from '../context/AtlasContext'
-import { totalMissing } from '../utils/formatters'
+import { formatDataType, formatPercent, totalMissing } from '../utils/formatters'
+
+function ProfileMetric({ label, value, hint }) {
+  return (
+    <article className="profile-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{hint}</small>
+    </article>
+  )
+}
 
 function ProfilingPage() {
   const { datasetId, rawProfile, fileName } = useAtlas()
+
+  const profileSummary = useMemo(() => {
+    const columnProfiles = rawProfile?.column_profiles ?? []
+    const typeCounts = { NUMBER: 0, STRING: 0, BOOLEAN: 0, DATETIME: 0 }
+
+    for (const column of columnProfiles) {
+      const type = formatDataType(column.dtype)
+      typeCounts[type] = (typeCounts[type] ?? 0) + 1
+    }
+
+    const missingColumns = columnProfiles.filter((column) => column.missing_values > 0)
+    const riskiestColumn = [...columnProfiles].sort(
+      (left, right) => (right.missing_values ?? 0) - (left.missing_values ?? 0),
+    )[0]
+
+    return {
+      typeCounts,
+      missingColumns,
+      riskiestColumn,
+      totalMissingCells: totalMissing(columnProfiles),
+    }
+  }, [rawProfile])
 
   if (!datasetId || !rawProfile) {
     return (
       <div className="page-grid">
         <section className="panel empty-panel">
           <h2>No dataset uploaded yet</h2>
-          <p>Go to Upload page first, then return here for profiling details.</p>
+          <p>Upload a dataset first, then return here for profiling details.</p>
           <Link to="/dataset" className="action-button">
             Go to Upload
           </Link>
@@ -22,119 +53,134 @@ function ProfilingPage() {
   }
 
   return (
-    <div className="page-grid">
-      <section className="panel page-hero">
-        <div className="page-hero-content">
-          <p className="page-kicker">Stage 02 / Profiling</p>
-          <h2>Understand structure, data types, and completeness before making changes.</h2>
-          <p>
-            This view keeps the diagnostics close to the preview so you can quickly spot risky
-            columns and decide what needs cleaning next.
-          </p>
-
-          <div className="page-hero-meta">
-            <div className="hero-stat">
-              <span>Total rows</span>
-              <strong>{rawProfile.rows}</strong>
-            </div>
-            <div className="hero-stat">
-              <span>Total columns</span>
-              <strong>{rawProfile.columns_count}</strong>
-            </div>
-            <div className="hero-stat">
-              <span>Missing cells</span>
-              <strong>{totalMissing(rawProfile.column_profiles)}</strong>
-            </div>
-          </div>
+    <div className="profile-workbench">
+      <header className="profile-toolbar">
+        <div>
+          <span>Profile</span>
+          <strong>{fileName || datasetId}</strong>
         </div>
 
-        <aside className="hero-side-card">
-          <div>
-            <h3>Profile Focus</h3>
-            <p>Check which fields are sparse, which are numeric, and which may need normalization.</p>
-          </div>
-          <div className="hero-side-list">
-            <div className="hero-side-item">
-              <span>Dataset</span>
-              <strong>{fileName || datasetId}</strong>
-            </div>
-            <div className="hero-side-item">
-              <span>Columns with missing</span>
-              <strong>
-                {rawProfile.column_profiles.filter((column) => column.missing_values > 0).length}
-              </strong>
-            </div>
-            <div className="hero-side-item">
-              <span>Recommended next step</span>
-              <strong>Review cleaning rules</strong>
-            </div>
-          </div>
-        </aside>
-      </section>
-
-      <section className="panel">
-        <div className="section-title-row">
-          <h3>Dataset Profile</h3>
-          <p>{fileName || datasetId}</p>
-        </div>
-
-        <div className="metric-grid">
-          <MetricCard label="Rows" value={rawProfile.rows} hint="Raw dataset record count." />
-          <MetricCard
-            label="Columns"
-            value={rawProfile.columns_count}
-            hint="Distinct fields detected in the file."
-          />
-          <MetricCard
-            label="Columns with Missing"
-            value={rawProfile.column_profiles.filter((column) => column.missing_values > 0).length}
-            hint="Useful targets for cleaning rules."
-          />
-          <MetricCard
-            label="Missing Cells"
-            value={totalMissing(rawProfile.column_profiles)}
-            hint="Total null or empty values across the raw data."
-          />
-        </div>
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Column</th>
-                <th>Data Type</th>
-                <th>Missing Values</th>
-                <th>Non-null Values</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rawProfile.column_profiles.map((column) => (
-                <tr key={`profile-${column.name}`}>
-                  <td>{column.name}</td>
-                  <td>{column.dtype}</td>
-                  <td>{column.missing_values}</td>
-                  <td>{column.non_null_values}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <DataTable
-          title="Profile Preview"
-          columns={rawProfile.columns}
-          rows={rawProfile.preview}
-          emptyMessage="No preview available."
-        />
-
-        <div className="page-actions">
-          <Link to="/dataset" className="text-link">
+        <div className="profile-toolbar__actions">
+          <Link to="/dataset" className="ghost-button">
             Back to Upload
           </Link>
-          <Link to="/dataset" className="action-button secondary">
-            Continue to Cleaning
+          <Link to="/cleaning" className="primary-button">
+            Continue to Clean
           </Link>
         </div>
+      </header>
+
+      <section className="profile-summary-strip">
+        <ProfileMetric label="Rows" value={rawProfile.rows} hint="Raw records" />
+        <ProfileMetric label="Columns" value={rawProfile.columns_count} hint="Detected fields" />
+        <ProfileMetric
+          label="Missing Cells"
+          value={profileSummary.totalMissingCells}
+          hint="Null or blank values"
+        />
+        <ProfileMetric
+          label="Columns With Missing"
+          value={profileSummary.missingColumns.length}
+          hint="Cleaning targets"
+        />
+      </section>
+
+      <section className="profile-layout">
+        <main className="profile-table-panel">
+          <div className="profile-panel-head">
+            <div>
+              <h2>Column Diagnostics</h2>
+              <p>Data type, completeness, and uniqueness per field.</p>
+            </div>
+          </div>
+
+          <div className="profile-table-scroll">
+            <table className="profile-diagnostics-table">
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Type</th>
+                  <th>Missing</th>
+                  <th>Missing %</th>
+                  <th>Unique</th>
+                  <th>Non-null</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rawProfile.column_profiles.map((column) => (
+                  <tr key={`profile-${column.name}`}>
+                    <td>
+                      <strong>{column.name}</strong>
+                    </td>
+                    <td>{formatDataType(column.dtype)}</td>
+                    <td>{column.missing_values}</td>
+                    <td>
+                      <div className="profile-missing-cell">
+                        <span>{formatPercent(column.missing_percent ?? 0, 1)}</span>
+                        <div className="profile-missing-bar">
+                          <div
+                            style={{
+                              width: `${Math.min(Number(column.missing_percent ?? 0), 100)}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </td>
+                    <td>{column.unique_values ?? '-'}</td>
+                    <td>{column.non_null_values}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </main>
+
+        <aside className="profile-side-panel">
+          <section className="profile-side-section">
+            <h3>Detected Types</h3>
+            <div className="profile-type-list">
+              {Object.entries(profileSummary.typeCounts).map(([type, count]) => (
+                <div key={type}>
+                  <span>{type}</span>
+                  <strong>{count}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="profile-side-section">
+            <h3>Quality Focus</h3>
+            <div className="profile-note">
+              <span>Highest missing</span>
+              <strong>{profileSummary.riskiestColumn?.name ?? '-'}</strong>
+              <small>
+                {profileSummary.riskiestColumn
+                  ? `${profileSummary.riskiestColumn.missing_values} missing values`
+                  : 'No columns detected'}
+              </small>
+            </div>
+          </section>
+
+          <section className="profile-side-section">
+            <h3>Basic Statistics</h3>
+            {rawProfile.basic_statistics?.length > 0 ? (
+              <div className="profile-stat-list">
+                {rawProfile.basic_statistics.slice(0, 5).map((stat) => (
+                  <article key={`stat-${stat.column}`}>
+                    <strong>{stat.column}</strong>
+                    <span>Mean {stat.mean ?? '-'}</span>
+                    <span>Median {stat.median ?? '-'}</span>
+                    <span>
+                      Range {stat.min ?? '-'} - {stat.max ?? '-'}
+                    </span>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-state-inline">No numeric columns detected yet.</p>
+            )}
+          </section>
+        </aside>
       </section>
     </div>
   )

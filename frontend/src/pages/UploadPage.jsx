@@ -1,13 +1,7 @@
-import { useMemo } from 'react'
-import MetricCard from '../components/MetricCard'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
-import {
-  formatBytes,
-  formatDataType,
-  formatDateTime,
-  formatPercent,
-  totalMissing,
-} from '../utils/formatters'
+import { formatBytes, formatDataType, formatDateTime, totalMissing } from '../utils/formatters'
 
 function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data' }) {
   return (
@@ -30,6 +24,23 @@ function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data' }) {
   )
 }
 
+function cloneRows(rows) {
+  return rows.map((row) => ({ ...row }))
+}
+
+function normalizeCsvValue(value) {
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  const text = String(value)
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replaceAll('"', '""')}"`
+  }
+
+  return text
+}
+
 function UploadPage() {
   const {
     datasetId,
@@ -37,96 +48,33 @@ function UploadPage() {
     datasetMeta,
     uploadedDataset,
     rawProfile,
-    cleanedProfile,
-    cleaningSummary,
-    analysis,
     busyAction,
     errorMessage,
     uploadDataset,
-    runAutoClean,
-    generateDashboard,
+    saveDatasetEdits,
     resetWorkspace,
   } = useAtlas()
 
-  const rawMissing = totalMissing(rawProfile?.column_profiles ?? [])
-  const cleanedMissing = totalMissing(cleanedProfile?.column_profiles ?? [])
-  const hiddenFlagColumns = useMemo(
-    () => new Set(['missing_required_field', 'duplicate_primary_key_flag']),
-    [],
-  )
+  const [editableRows, setEditableRows] = useState([])
+  const [dirtyCells, setDirtyCells] = useState(() => new Set())
+  const [saveMessage, setSaveMessage] = useState('')
+  const [undoStack, setUndoStack] = useState([])
+  const [redoStack, setRedoStack] = useState([])
 
-  const displayColumns = useMemo(
-    () => uploadedDataset.columns.filter((column) => !hiddenFlagColumns.has(column)),
-    [uploadedDataset.columns, hiddenFlagColumns],
-  )
-
-  const flaggedMissingRequiredRows = Number(cleaningSummary?.missing_required_field_rows ?? 0)
-  const flaggedDuplicateKeyRows = Number(cleaningSummary?.duplicate_primary_key_rows ?? 0)
+  const columns = uploadedDataset.columns
+  const hasDataset = Boolean(datasetId)
+  const hasUnsavedChanges = dirtyCells.size > 0
+  const canUndo = undoStack.length > 0
+  const canRedo = redoStack.length > 0
 
   const columnProfilesByName = useMemo(
-    () =>
-      new Map((rawProfile?.column_profiles ?? []).map((column) => [column.name, column])),
+    () => new Map((rawProfile?.column_profiles ?? []).map((column) => [column.name, column])),
     [rawProfile],
   )
 
-  const dataTypeCounts = useMemo(() => {
-    const totals = { NUMBER: 0, STRING: 0, BOOLEAN: 0, DATETIME: 0 }
-
-    for (const column of rawProfile?.column_profiles ?? []) {
-      const label = formatDataType(column.dtype)
-      totals[label] = (totals[label] ?? 0) + 1
-    }
-
-    return totals
-  }, [rawProfile])
-
-  const qualityScore = useMemo(() => {
-    if (!rawProfile?.rows || !rawProfile?.columns_count) {
-      return 0
-    }
-
-    const totalCells = rawProfile.rows * rawProfile.columns_count
-    return Math.max(0, ((totalCells - rawMissing) / totalCells) * 100)
-  }, [rawMissing, rawProfile])
-
-  const numericSummary = analysis?.numeric_summary?.slice(0, 4) ?? []
-
-  const cleaningCapabilities = [
-    {
-      label: 'Handle Missing Values',
-      status: cleanedProfile
-        ? `${cleaningSummary?.missing_values_filled ?? 0} filled`
-        : 'Ready to apply',
-    },
-    {
-      label: 'Remove Duplicates',
-      status: cleanedProfile
-        ? `${cleaningSummary?.duplicates_removed ?? 0} removed`
-        : 'Ready to apply',
-    },
-    {
-      label: 'Convert Data Types',
-      status: cleanedProfile
-        ? `${cleaningSummary?.date_columns_converted?.length ?? 0} converted`
-        : 'Auto-detect dates',
-    },
-    {
-      label: 'Standardize Formats',
-      status: cleanedProfile
-        ? `${cleaningSummary?.text_columns_standardized?.length ?? 0} columns normalized`
-        : 'Whitespace and text cleanup',
-    },
-    {
-      label: 'Filter Invalid Data',
-      status: cleanedProfile
-        ? `${cleaningSummary?.invalid_rows_removed ?? 0} rows filtered`
-        : 'Invalid rows review ready',
-    },
-  ]
-
   const editorFormula = useMemo(() => {
     if (!rawProfile?.column_profiles?.length) {
-      return '= Upload a CSV or Excel file to start the query view.'
+      return '= Upload a CSV or Excel file to start editing.'
     }
 
     const typeMap = {
@@ -137,329 +85,303 @@ function UploadPage() {
     }
 
     const columnTypes = rawProfile.column_profiles
-      .slice(0, 6)
-      .map(
-        (column) =>
-          `{"${column.name}", type ${typeMap[formatDataType(column.dtype)] ?? 'text'}}`,
-      )
+      .slice(0, 8)
+      .map((column) => `{"${column.name}", type ${typeMap[formatDataType(column.dtype)] ?? 'text'}}`)
       .join(', ')
 
     return `= Table.TransformColumnTypes(#"Promoted Headers", {${columnTypes}})`
   }, [rawProfile])
 
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setEditableRows(cloneRows(uploadedDataset.rows))
+    setDirtyCells(new Set())
+    setSaveMessage('')
+    setUndoStack([])
+    setRedoStack([])
+  }, [uploadedDataset.rows])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  function markDirty(token = '__table') {
+    setDirtyCells((currentCells) => {
+      const nextCells = new Set(currentCells)
+      nextCells.add(token)
+      return nextCells
+    })
+    setSaveMessage('')
+  }
+
+  function setRowsWithHistory(updater, dirtyToken) {
+    setEditableRows((currentRows) => {
+      const previousRows = cloneRows(currentRows)
+      const nextRows = updater(previousRows)
+
+      setUndoStack((currentStack) => [...currentStack, previousRows])
+      setRedoStack([])
+      return nextRows
+    })
+    markDirty(dirtyToken)
+  }
+
+  function updateCell(rowIndex, column, value) {
+    setRowsWithHistory(
+      (currentRows) =>
+        currentRows.map((row, index) =>
+        index === rowIndex
+          ? {
+              ...row,
+              [column]: value,
+            }
+          : row,
+        ),
+      `${rowIndex}:${column}`,
+    )
+  }
+
+  function addRow() {
+    const nextRow = Object.fromEntries(columns.map((column) => [column, '']))
+    setRowsWithHistory((currentRows) => [...currentRows, nextRow], `${editableRows.length}:__row`)
+  }
+
+  function removeRow(rowIndex) {
+    setRowsWithHistory(
+      (currentRows) => currentRows.filter((_, index) => index !== rowIndex),
+      `removed:${rowIndex}`,
+    )
+  }
+
+  function resetEdits() {
+    setRowsWithHistory(() => cloneRows(uploadedDataset.rows), '__reset')
+  }
+
+  function undoEdit() {
+    if (!canUndo) {
+      return
+    }
+
+    setUndoStack((currentUndoStack) => {
+      const previousRows = currentUndoStack.at(-1)
+      const remainingUndoStack = currentUndoStack.slice(0, -1)
+
+      setRedoStack((currentRedoStack) => [...currentRedoStack, cloneRows(editableRows)])
+      setEditableRows(cloneRows(previousRows))
+      markDirty('__undo')
+
+      return remainingUndoStack
+    })
+  }
+
+  function redoEdit() {
+    if (!canRedo) {
+      return
+    }
+
+    setRedoStack((currentRedoStack) => {
+      const nextRows = currentRedoStack.at(-1)
+      const remainingRedoStack = currentRedoStack.slice(0, -1)
+
+      setUndoStack((currentUndoStack) => [...currentUndoStack, cloneRows(editableRows)])
+      setEditableRows(cloneRows(nextRows))
+      markDirty('__redo')
+
+      return remainingRedoStack
+    })
+  }
+
+  function exportCsv() {
+    if (!hasDataset || columns.length === 0) {
+      return
+    }
+
+    const csvRows = [
+      columns.map(normalizeCsvValue).join(','),
+      ...editableRows.map((row) => columns.map((column) => normalizeCsvValue(row[column])).join(',')),
+    ]
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const exportUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const baseName = (fileName || 'atlas_dataset').replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_')
+
+    link.href = exportUrl
+    link.download = `${baseName || 'atlas_dataset'}_edited.csv`
+    document.body.append(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(exportUrl)
+  }
+
+  async function handleSaveEdits() {
+    try {
+      await saveDatasetEdits({ columns, rows: editableRows })
+      setDirtyCells(new Set())
+      setUndoStack([])
+      setRedoStack([])
+      setSaveMessage('Saved. The active dataset has been updated.')
+    } catch {
+      setSaveMessage('')
+    }
+  }
+
   return (
-    <div className="page-grid dataset-page">
-      <section className="page-header dataset-page__header">
-        <div>
-          <h1>Datasets</h1>
-          <p>Manage, explore, clean, and analyze your uploaded data sources.</p>
+    <div className="upload-workbench">
+      <aside className="query-sidebar">
+        <div className="query-sidebar__head">
+          <span>Queries [1]</span>
         </div>
 
-        <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} />
-      </section>
+        <div className={hasDataset ? 'query-item query-item--active' : 'query-item'}>
+          <span className="query-table-icon" aria-hidden="true" />
+          <strong>{fileName || 'No dataset loaded'}</strong>
+        </div>
+      </aside>
 
-      <section className="dataset-layout dataset-layout--editor">
-        <div className="dataset-stack">
-          <section className="surface-card dataset-card dataset-card--editor">
-            {datasetId ? (
-              <>
-                <div className="card-header card-header--dataset card-header--editor">
-                  <div>
-                    <div className="title-row">
-                      <h2>{fileName}</h2>
-                      <span className="status-badge status-badge--success">Active</span>
-                    </div>
-                    <p>Uploaded on {formatDateTime(datasetMeta.uploadedAt)}</p>
-                  </div>
-                </div>
+      <section className="query-main">
+        <div className="query-notice">
+          <span className="query-notice__icon">i</span>
+          <span>{hasDataset ? 'Preview is editable. Save changes before profiling or cleaning.' : 'Import a CSV or Excel file to begin.'}</span>
+          <button type="button" className="editor-toolbar__button" onClick={resetEdits} disabled={!hasUnsavedChanges}>
+            Reset Edits
+          </button>
+        </div>
 
-                {busyAction === 'cleaning' ? (
-                  <p className="info-banner">Cleaning in progress... applying fill, type fixes, and duplicate removal.</p>
-                ) : null}
+        <div className="editor-toolbar upload-editor-toolbar">
+          <div className="editor-toolbar__group">
+            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} />
+            <button type="button" className="editor-toolbar__button" onClick={resetWorkspace} disabled={!hasDataset}>
+              Close
+            </button>
+            <button type="button" className="editor-toolbar__button" onClick={undoEdit} disabled={!canUndo}>
+              Undo
+            </button>
+            <button type="button" className="editor-toolbar__button" onClick={redoEdit} disabled={!canRedo}>
+              Redo
+            </button>
+            <button
+              type="button"
+              className="editor-toolbar__button"
+              onClick={handleSaveEdits}
+              disabled={!hasDataset || !hasUnsavedChanges || busyAction === 'saving'}
+            >
+              {busyAction === 'saving' ? 'Saving...' : 'Save Changes'}
+            </button>
+            <button type="button" className="editor-toolbar__button" onClick={addRow} disabled={!hasDataset}>
+              Add Row
+            </button>
+            <button type="button" className="editor-toolbar__button" onClick={exportCsv} disabled={!hasDataset}>
+              Export CSV
+            </button>
+          </div>
 
-                {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
+          <div className="editor-toolbar__group">
+            <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'}>
+              Profile
+            </Link>
+            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'}>
+              Clean
+            </Link>
+          </div>
+        </div>
 
-                <div className="editor-toolbar">
-                  <div className="editor-toolbar__group">
-                    <button type="button" className="editor-toolbar__button">
-                      Close
-                    </button>
-                    <button type="button" className="editor-toolbar__button">
-                      Apply
-                    </button>
-                    <button type="button" className="editor-toolbar__button">
-                      Types
-                    </button>
-                  </div>
+        <div className="editor-formula-bar">
+          <span className="editor-formula-bar__fx">fx</span>
+          <div className="editor-formula-bar__input">{editorFormula}</div>
+        </div>
 
-                  <div className="editor-toolbar__group">
-                    <button
-                      type="button"
-                      className="editor-toolbar__button"
-                      onClick={generateDashboard}
-                      disabled={busyAction === 'dashboarding'}
-                    >
-                      Refresh
-                    </button>
-                    <button
-                      type="button"
-                      className="editor-toolbar__button"
-                      onClick={runAutoClean}
-                      disabled={busyAction === 'cleaning'}
-                    >
-                      Clean
-                    </button>
-                  </div>
-                </div>
+        {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
+        {saveMessage ? <p className="info-banner">{saveMessage}</p> : null}
 
-                <div className="editor-formula-bar">
-                  <span className="editor-formula-bar__fx">fx</span>
-                  <div className="editor-formula-bar__input">{editorFormula}</div>
-                </div>
+        {hasDataset ? (
+          <div className="dataset-table-shell dataset-table-shell--editor upload-edit-grid">
+            <div className="dataset-table-scroll dataset-table-scroll--editor">
+              <table className="dataset-grid-table dataset-grid-table--editor editable-grid-table">
+                <thead>
+                  <tr>
+                    <th className="row-index-col">#</th>
+                    {columns.map((column) => {
+                      const profile = columnProfilesByName.get(column)
 
-                <div className="dataset-summary-grid dataset-summary-grid--compact">
-                  <div className="stat-tile">
-                    <span>Rows</span>
-                    <strong>{rawProfile?.rows ?? 0}</strong>
-                  </div>
-                  <div className="stat-tile">
-                    <span>Columns</span>
-                    <strong>{rawProfile?.columns_count ?? 0}</strong>
-                  </div>
-                  <div className="stat-tile">
-                    <span>Size</span>
-                    <strong>{formatBytes(datasetMeta.sizeBytes)}</strong>
-                  </div>
-                  <div className="stat-tile stat-tile--quality">
-                    <div className="quality-row">
-                      <span>Quality</span>
-                      <strong>{formatPercent(qualityScore, 0)}</strong>
-                    </div>
-                    <div className="quality-bar">
-                      <div className="quality-bar__fill" style={{ width: `${qualityScore}%` }} />
-                    </div>
-                  </div>
-                </div>
+                      return (
+                        <th key={column}>
+                          <span className="column-title">{column}</span>
+                          <span className="column-meta">
+                            {formatDataType(profile?.dtype)} / {profile?.missing_values ?? 0} null
+                          </span>
+                        </th>
+                      )
+                    })}
+                    <th className="row-action-col">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {editableRows.map((row, rowIndex) => (
+                    <tr key={`editable-row-${rowIndex}`}>
+                      <td className="row-index-col">{rowIndex + 1}</td>
+                      {columns.map((column) => {
+                        const dirty = dirtyCells.has(`${rowIndex}:${column}`)
 
-                <div className="dataset-table-shell dataset-table-shell--editor">
-                  <div className="dataset-table-scroll dataset-table-scroll--editor">
-                    <table className="dataset-grid-table dataset-grid-table--editor">
-                      <thead>
-                        <tr>
-                          <th className="row-status-col">Status</th>
-                          <th className="row-index-col">#</th>
-                          {displayColumns.map((column) => {
-                            const profile = columnProfilesByName.get(column)
-
-                            return (
-                              <th key={column}>
-                                <span className="column-title">{column}</span>
-                                <span className="column-meta">
-                                  {formatDataType(profile?.dtype)} / {profile?.missing_values ?? 0}{' '}
-                                  null
-                                </span>
-                              </th>
-                            )
-                          })}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {uploadedDataset.rows.map((row, rowIndex) => (
-                          <tr
-                            key={`dataset-row-${rowIndex}`}
-                            className={`${row?.missing_required_field ? 'row-flag-missing-required' : ''} ${row?.duplicate_primary_key_flag ? 'row-flag-duplicate-key' : ''}`.trim()}
-                          >
-                            <td className="row-status-col">
-                              {row?.missing_required_field ? (
-                                <span className="row-flag-chip row-flag-chip--missing">Missing Required</span>
-                              ) : row?.duplicate_primary_key_flag ? (
-                                <span className="row-flag-chip row-flag-chip--duplicate">Duplicate Key</span>
-                              ) : (
-                                <span className="row-flag-chip row-flag-chip--clean">Clean</span>
-                              )}
-                            </td>
-                            <td className="row-index-col">{rowIndex + 1}</td>
-                            {displayColumns.map((column) => (
-                              <td key={`${column}-${rowIndex}`}>{String(row[column] ?? '-')}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-
-                </div>
-              </>
-            ) : (
-              <div className="empty-panel">
-                <h2>No dataset loaded yet</h2>
-                <p>Import a CSV or Excel file to open the data-first workspace.</p>
-                <ImportDatasetButton
-                  busy={busyAction === 'uploading'}
-                  onFileSelect={uploadDataset}
-                  label="Import your first dataset"
-                />
-              </div>
-            )}
-          </section>
-
-          {datasetId ? (
-            <div className="content-grid content-grid--two">
-              <section className="surface-card">
-                <div className="card-header">
-                  <div>
-                    <h2>Data Profiling</h2>
-                    <p>Shape, missingness, data types, and basic numeric statistics.</p>
-                  </div>
-                </div>
-
-                <div className="metric-grid">
-                  <MetricCard
-                    label="Rows"
-                    value={rawProfile?.rows ?? 0}
-                    hint="Total records detected."
-                  />
-                  <MetricCard
-                    label="Columns"
-                    value={rawProfile?.columns_count ?? 0}
-                    hint="Fields inferred from the source file."
-                  />
-                  <MetricCard
-                    label="Number Fields"
-                    value={dataTypeCounts.NUMBER}
-                    hint="Columns suitable for numeric statistics."
-                  />
-                  <MetricCard
-                    label="Missing Values"
-                    value={rawMissing}
-                    hint="Null or empty values across the dataset."
-                  />
-                </div>
-
-                <div className="profile-breakdown-grid">
-                  <article className="mini-panel">
-                    <h3>Detected Data Types</h3>
-                    <div className="type-summary-list">
-                      <div>
-                        <span>String</span>
-                        <strong>{dataTypeCounts.STRING}</strong>
-                      </div>
-                      <div>
-                        <span>Number</span>
-                        <strong>{dataTypeCounts.NUMBER}</strong>
-                      </div>
-                      <div>
-                        <span>Boolean</span>
-                        <strong>{dataTypeCounts.BOOLEAN}</strong>
-                      </div>
-                      <div>
-                        <span>Date/Time</span>
-                        <strong>{dataTypeCounts.DATETIME}</strong>
-                      </div>
-                    </div>
-                  </article>
-
-                  <article className="mini-panel">
-                    <h3>Basic Statistics</h3>
-                    {numericSummary.length > 0 ? (
-                      <div className="stat-list">
-                        {numericSummary.map((item) => (
-                          <div key={item.column} className="stat-list__row">
-                            <div>
-                              <strong>{item.column}</strong>
-                              <span>
-                                Mean {item.mean ?? '-'} / Median {item.median ?? '-'}
-                              </span>
-                            </div>
-                            <em>
-                              Min {item.min ?? '-'} / Max {item.max ?? '-'}
-                            </em>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="empty-state-inline">
-                        Statistics will appear after the upload is processed.
-                      </p>
-                    )}
-                  </article>
-                </div>
-              </section>
-
-              <section className="surface-card">
-                <div className="card-header">
-                  <div>
-                    <h2>Cleaning Studio</h2>
-                    <p>Run core cleanup actions and review the transformation summary.</p>
-                  </div>
-                  <div className="card-actions">
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={runAutoClean}
-                      disabled={busyAction === 'cleaning'}
-                    >
-                      {busyAction === 'cleaning' ? 'Cleaning...' : 'Run Auto Cleaning'}
-                    </button>
-                    <button type="button" className="ghost-button" onClick={resetWorkspace}>
-                      Reset
-                    </button>
-                  </div>
-                </div>
-
-                <div className="cleaning-capability-list">
-                  {cleaningCapabilities.map((item) => (
-                    <article key={item.label} className="capability-card">
-                      <strong>{item.label}</strong>
-                      <span>{item.status}</span>
-                    </article>
+                        return (
+                          <td key={`${column}-${rowIndex}`} className={dirty ? 'editable-cell is-dirty' : 'editable-cell'}>
+                            <input
+                              className="editable-cell-input"
+                              value={row[column] ?? ''}
+                              onChange={(event) => updateCell(rowIndex, column, event.target.value)}
+                              aria-label={`${column} row ${rowIndex + 1}`}
+                            />
+                          </td>
+                        )
+                      })}
+                      <td className="row-action-col">
+                        <button type="button" className="table-nav-button" onClick={() => removeRow(rowIndex)}>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
                   ))}
-                </div>
-
-                {cleanedProfile ? (
-                  <div className="metric-grid">
-                    <MetricCard
-                      label="Missing After Clean"
-                      value={cleanedMissing}
-                      hint="Remaining gaps after the cleaning step."
-                    />
-                    <MetricCard
-                      label="Duplicates Removed"
-                      value={cleaningSummary?.duplicates_removed ?? 0}
-                      hint="Duplicate records removed."
-                    />
-                    <MetricCard
-                      label="Dates Converted"
-                      value={cleaningSummary?.date_columns_converted?.length ?? 0}
-                      hint="Columns converted to datetime."
-                    />
-                    <MetricCard
-                      label="Invalid Rows Filtered"
-                      value={cleaningSummary?.invalid_rows_removed ?? 0}
-                      hint="Rows removed during invalid-data filtering."
-                    />
-                    <MetricCard
-                      label="Missing Required (Flagged)"
-                      value={flaggedMissingRequiredRows}
-                      hint="Rows kept but missing required business fields."
-                    />
-                    <MetricCard
-                      label="Duplicate PK (Flagged)"
-                      value={flaggedDuplicateKeyRows}
-                      hint="Rows flagged for duplicate identifier values."
-                    />
-                  </div>
-                ) : (
-                  <p className="empty-state-inline">
-                    Cleaning has not been applied yet. Run Auto Cleaning to generate the cleaned dataset view.
-                  </p>
-                )}
-              </section>
+                </tbody>
+              </table>
             </div>
-          ) : null}
-        </div>
+          </div>
+        ) : (
+          <div className="empty-panel upload-empty-panel">
+            <h2>No dataset loaded</h2>
+            <p>Choose a CSV or Excel file. The table will appear here and can be edited before saving.</p>
+            <ImportDatasetButton
+              busy={busyAction === 'uploading'}
+              onFileSelect={uploadDataset}
+              label="Import Dataset"
+            />
+          </div>
+        )}
+
+        <footer className="query-status-bar">
+          <span>{columns.length} COLUMNS</span>
+          <span>{editableRows.length} ROWS</span>
+          <span>{totalMissing(rawProfile?.column_profiles ?? [])} MISSING</span>
+          <span>{formatBytes(datasetMeta.sizeBytes)}</span>
+          <span>{fileName ? `Uploaded ${formatDateTime(datasetMeta.uploadedAt)}` : 'No active preview'}</span>
+        </footer>
       </section>
+
+      <aside className="query-settings-panel">
+        <div className="query-settings-panel__head">
+          <strong>Query Settings</strong>
+        </div>
+
+        <div className="query-setting-group">
+          <span>Properties</span>
+          <label htmlFor="query-name">Name</label>
+          <input id="query-name" value={fileName || ''} readOnly />
+        </div>
+
+        <div className="query-setting-group">
+          <span>Applied Steps</span>
+          <div className="applied-step">Source</div>
+          <div className="applied-step">Navigation</div>
+          <div className="applied-step">Promoted Headers</div>
+          {hasUnsavedChanges ? <div className="applied-step applied-step--pending">Pending Edits</div> : null}
+          {saveMessage ? <div className="applied-step applied-step--saved">Saved Edits</div> : null}
+        </div>
+      </aside>
     </div>
   )
 }
