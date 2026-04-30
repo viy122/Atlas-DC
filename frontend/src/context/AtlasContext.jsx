@@ -64,6 +64,11 @@ async function fetchJson(path, options = {}) {
   return payload
 }
 
+function getFilenameFromContentDisposition(headerValue, fallback) {
+  const match = headerValue?.match(/filename="?([^"]+)"?/i)
+  return match?.[1] ?? fallback
+}
+
 export function AtlasProvider({ children }) {
   const [datasetId, setDatasetId] = useState('')
   const [fileName, setFileName] = useState('')
@@ -260,6 +265,35 @@ export function AtlasProvider({ children }) {
     }
   }
 
+  const visualizeDatasetRows = useCallback(async ({ columns = [], rows = [], override = null } = {}) => {
+    return fetchJson('/api/visualize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ columns, rows, override }),
+    })
+  }, [])
+
+  const filterDatasetRows = useCallback(
+    async ({ columns = [], rows = [], filters = [], override = null, chartOverrides = [] } = {}) => {
+      return fetchJson('/api/filter', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          columns,
+          rows,
+          filters,
+          override,
+          chart_overrides: chartOverrides,
+        }),
+      })
+    },
+    [],
+  )
+
   const fetchDatasetTable = useCallback(async ({ stage = 'raw', page = 1, pageSize = 50 } = {}) => {
     if (!datasetId) {
       throw new Error('No dataset available yet.')
@@ -279,6 +313,46 @@ export function AtlasProvider({ children }) {
     setComparison(payload.comparison ?? null)
     return payload
   }, [datasetId])
+
+  const downloadDataset = useCallback(
+    async ({ stage = 'cleaned' } = {}) => {
+      if (!datasetId) {
+        setErrorMessage('No dataset available yet.')
+        return
+      }
+
+      setBusyAction('exporting')
+      setErrorMessage('')
+
+      try {
+        const response = await fetch(`${API_BASE}/datasets/${datasetId}/export?stage=${stage}`)
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}))
+          throw new Error(payload?.detail ?? 'Export failed')
+        }
+
+        const blob = await response.blob()
+        const filename = getFilenameFromContentDisposition(
+          response.headers.get('Content-Disposition'),
+          `${fileName || 'atlas_dataset'}_${stage}.csv`,
+        )
+        const exportUrl = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+
+        link.href = exportUrl
+        link.download = filename
+        document.body.append(link)
+        link.click()
+        link.remove()
+        URL.revokeObjectURL(exportUrl)
+      } catch (error) {
+        setErrorMessage(error.message)
+      } finally {
+        setBusyAction('idle')
+      }
+    },
+    [datasetId, fileName],
+  )
 
   const generateChartData = useCallback(
     async ({
@@ -416,8 +490,11 @@ export function AtlasProvider({ children }) {
     saveDatasetEdits,
     runAutoClean,
     generateDashboard,
+    visualizeDatasetRows,
+    filterDatasetRows,
     fetchDatasetTable,
     fetchComparison,
+    downloadDataset,
     generateChartData,
     clearError,
     resetWorkspace,

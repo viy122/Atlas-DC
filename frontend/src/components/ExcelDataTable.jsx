@@ -39,7 +39,7 @@ function ExcelDataTable({
                     <tr key={`excel-row-${rowIndex}`}>
                       <td className="row-number-col">{rowIndex + 1}</td>
                       {columns.map((column) => (
-                        <td key={`${column}-${rowIndex}`}>{formatValue(row[column])}</td>
+                        <td key={`${column}-${rowIndex}`}>{formatValue(row[column], { empty: '' })}</td>
                       ))}
                     </tr>
                   ))

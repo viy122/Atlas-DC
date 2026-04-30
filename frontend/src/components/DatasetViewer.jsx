@@ -132,7 +132,7 @@ function DatasetViewer({ title, stage = 'raw' }) {
                   <tr key={`${stage}-row-${rowIndex}-${rowNumber}`}>
                     <td className="row-number-col">{rowNumber}</td>
                     {columns.map((column) => (
-                      <td key={`${column}-${rowIndex}`}>{formatValue(row[column])}</td>
+                      <td key={`${column}-${rowIndex}`}>{formatValue(row[column], { empty: '' })}</td>
                     ))}
                   </tr>
                 )

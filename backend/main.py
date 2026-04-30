@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from datetime import datetime, timezone
 from io import BytesIO
 from uuid import uuid4
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="ATLAS Backend", version="1.1.0")
@@ -29,11 +31,52 @@ app.add_middleware(
 
 DATASETS: dict[str, dict[str, object]] = {}
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+INTERNAL_COLUMN_PREFIX = "_atlas_"
+NULL_TEXT_TOKENS = {
+    "",
+    "-",
+    "--",
+    "n/a",
+    "na",
+    "null",
+    "none",
+    "unknown",
+}
 
 
 class DatasetUpdatePayload(BaseModel):
     columns: list[str] = Field(default_factory=list, min_length=1)
     rows: list[dict[str, object]] = Field(default_factory=list)
+
+
+class VisualizationOverridePayload(BaseModel):
+    chart_type: str | None = None
+    x_axis: str | None = None
+    y_axis: str | None = None
+    aggregation: str = "count"
+
+
+class VisualizationFilterPayload(BaseModel):
+    column: str
+    type: str | None = None
+    values: list[object] = Field(default_factory=list)
+    start: object | None = None
+    end: object | None = None
+    min: object | None = None
+    max: object | None = None
+
+
+class VisualizationChartOverridePayload(VisualizationOverridePayload):
+    id: str
+    source: str | None = None
+
+
+class VisualizationDatasetPayload(BaseModel):
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, object]] = Field(default_factory=list)
+    override: VisualizationOverridePayload | None = None
+    filters: list[VisualizationFilterPayload] = Field(default_factory=list)
+    chart_overrides: list[VisualizationChartOverridePayload] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -67,8 +110,8 @@ def _read_tabular_file(content: bytes, extension: str) -> pd.DataFrame:
 
     try:
         if extension == ".csv":
-            return pd.read_csv(BytesIO(content))
-        return pd.read_excel(BytesIO(content))
+            return _normalize_dataframe_input(pd.read_csv(BytesIO(content)))
+        return _normalize_dataframe_input(pd.read_excel(BytesIO(content)))
     except pd.errors.EmptyDataError:
         raise HTTPException(status_code=400, detail="Uploaded file has no data") from None
     except pd.errors.ParserError:
@@ -84,6 +127,40 @@ def _read_tabular_file(content: bytes, extension: str) -> pd.DataFrame:
         raise HTTPException(status_code=400, detail=f"Unable to parse file: {exc}") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to process uploaded file") from None
+
+
+def _normalize_nullable_value(value: object) -> object:
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):  # type: ignore[arg-type]
+            return None
+    except TypeError:
+        pass
+
+    if isinstance(value, str):
+        normalized = re.sub(r"\s+", " ", value.strip())
+        if normalized.lower() in NULL_TEXT_TOKENS:
+            return None
+        return normalized
+
+    return value
+
+
+def _normalize_dataframe_input(df: pd.DataFrame) -> pd.DataFrame:
+    normalized_df = df.copy()
+    for column in normalized_df.columns:
+        if pd.api.types.is_object_dtype(normalized_df[column]) or pd.api.types.is_string_dtype(normalized_df[column]):
+            normalized_df[column] = normalized_df[column].map(_normalize_nullable_value)
+    return normalized_df
+
+
+def _is_numeric_input_column(column_name: str, previous_series: pd.Series | None = None) -> bool:
+    if previous_series is not None and pd.api.types.is_numeric_dtype(previous_series):
+        return True
+    normalized = _normalize_column_name(column_name)
+    return normalized in {"age"}
 
 
 def _json_safe(value: object) -> object:
@@ -142,13 +219,31 @@ def _looks_like_date_column(column_name: str, series: pd.Series) -> bool:
 
 
 def _build_preview(df: pd.DataFrame, limit: int = 5) -> list[dict[str, object]]:
-    preview_df = df.head(limit).copy()
+    preview_df = _get_user_visible_dataframe(df).head(limit).copy()
     preview_df = preview_df.where(pd.notna(preview_df), None)
     return _json_safe(preview_df.to_dict(orient="records"))  # type: ignore[return-value]
 
 
+def _is_internal_column(column: object) -> bool:
+    return str(column).startswith(INTERNAL_COLUMN_PREFIX)
+
+
+def _get_user_visible_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if not _is_internal_column(column)]
+
+
+def _get_user_visible_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    return df.loc[:, _get_user_visible_columns(df)].copy()
+
+
+def _safe_export_filename(filename: object, suffix: str) -> str:
+    stem = str(filename or "atlas_dataset").rsplit(".", 1)[0]
+    safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "atlas_dataset"
+    return f"{safe_stem}_{suffix}.csv"
+
+
 def _build_full_dataset(df: pd.DataFrame) -> dict[str, object]:
-    full_df = df.copy()
+    full_df = _get_user_visible_dataframe(df)
     full_df = full_df.where(pd.notna(full_df), None)
 
     return {
@@ -160,10 +255,11 @@ def _build_full_dataset(df: pd.DataFrame) -> dict[str, object]:
 
 
 def _estimate_dataframe_size_bytes(df: pd.DataFrame) -> int:
-    return int(df.memory_usage(deep=True).sum())
+    return int(_get_user_visible_dataframe(df).memory_usage(deep=True).sum())
 
 
 def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
     column_profiles: list[dict[str, object]] = []
     basic_statistics: list[dict[str, object]] = []
 
@@ -217,6 +313,7 @@ def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object
 
 
 def _build_table_page(df: pd.DataFrame, page: int, page_size: int) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
     total_rows = int(df.shape[0])
     total_pages = max((total_rows + page_size - 1) // page_size, 1)
     safe_page = min(page, total_pages)
@@ -275,9 +372,9 @@ def _select_dataframe(dataset: dict[str, object], stage: str) -> tuple[pd.DataFr
 
 
 DEFAULT_CLEANING_CONFIG: dict[str, object] = {
-    "placeholder_null_tokens": ("", " ", "-", "--", "N/A", "n/a", "NULL", "null", "None", "unknown", "Unknown"),
+    "placeholder_null_tokens": tuple(NULL_TEXT_TOKENS),
     "critical_keywords": ("id", "email"),
-    "required_keywords": ("last_name", "lastname", "surname", "department"),
+    "required_keywords": (),
     "date_keywords": ("date", "time", "created", "updated", "timestamp"),
     "name_label_keywords": ("name", "label", "city", "department"),
     "protected_text_keywords": ("email", "username", "id", "code", "acronym"),
@@ -664,6 +761,12 @@ def _clean_dataframe(
             "conversion": int(flagged_counts["conversion"]),
         },
         "validation_errors": validation_errors,
+        "flag_columns": {
+            "flags": "_atlas_flags",
+            "has_flag": "_atlas_has_flag",
+            "missing_required": "_atlas_missing_required_flag",
+            "duplicate_primary_key": "_atlas_duplicate_primary_key_flag",
+        },
         "config": {
             "fill_text_with_mode": bool(cleaning_config["fill_text_with_mode"]),
             "required_missing_drop_threshold": cleaning_config["required_missing_drop_threshold"],
@@ -701,6 +804,7 @@ def _clean_dataframe(
 
 
 def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
     numeric_columns = list(df.select_dtypes(include=["number"]).columns)
     categorical_columns = list(
         df.select_dtypes(exclude=["number", "datetime", "datetimetz"]).columns
@@ -759,82 +863,1337 @@ def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
     }
 
 
-def _build_visualization_payload(df: pd.DataFrame) -> dict[str, object]:
-    missing_values = [
-        {"label": column, "value": int(df[column].isna().sum())} for column in df.columns
+APEX_CHART_COLORS = [
+    "#36d399",
+    "#60a5fa",
+    "#fbbf24",
+    "#f472b6",
+    "#a78bfa",
+    "#2dd4bf",
+    "#fb7185",
+    "#c4b5fd",
+]
+VALID_VISUAL_CHART_TYPES = {"bar", "line", "area", "pie", "donut", "scatter", "histogram"}
+BOOLEAN_TRUE_VALUES = {"true", "yes", "y", "1", "active", "enabled", "valid"}
+BOOLEAN_FALSE_VALUES = {"false", "no", "n", "0", "inactive", "disabled", "invalid"}
+BOOLEAN_COLUMN_HINTS = ("is", "has", "flag", "active", "enabled", "valid", "bool")
+
+
+def _build_dataframe_from_visualization_payload(payload: VisualizationDatasetPayload) -> pd.DataFrame:
+    columns = [str(column) for column in payload.columns]
+    if len(set(columns)) != len(columns):
+        raise HTTPException(status_code=400, detail="Column names must be unique")
+
+    if not columns:
+        columns = list(
+            dict.fromkeys(
+                str(key)
+                for row in payload.rows
+                for key in row.keys()
+            )
+        )
+
+    rows = [
+        {column: _normalize_nullable_value(row.get(column)) for column in columns}
+        for row in payload.rows
     ]
 
-    categorical_columns = list(
-        df.select_dtypes(exclude=["number", "datetime", "datetimetz"]).columns
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _filter_value_is_present(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip() == "":
+        return False
+    return True
+
+
+def _apply_visualization_filters(
+    df: pd.DataFrame,
+    filters: list[VisualizationFilterPayload],
+) -> pd.DataFrame:
+    if not filters or df.empty:
+        return df.copy()
+
+    filtered_df = df.copy()
+
+    for filter_item in filters:
+        column = str(filter_item.column)
+        if column not in filtered_df.columns:
+            continue
+
+        filter_type = str(filter_item.type or "").lower().strip()
+        series = filtered_df[column]
+
+        if filter_type == "datetime" or _looks_like_datetime_for_visualization(column, series):
+            parsed_series = _coerce_datetime_for_visualization(series)
+            mask = pd.Series(True, index=filtered_df.index)
+
+            if _filter_value_is_present(filter_item.start):
+                start_date = pd.to_datetime(filter_item.start, errors="coerce")
+                if pd.notna(start_date):
+                    mask = mask & (parsed_series >= start_date)
+
+            if _filter_value_is_present(filter_item.end):
+                end_date = pd.to_datetime(filter_item.end, errors="coerce")
+                if pd.notna(end_date):
+                    mask = mask & (parsed_series <= end_date)
+
+            filtered_df = filtered_df.loc[mask.fillna(False)].copy()
+            continue
+
+        if filter_type == "numeric" or pd.api.types.is_numeric_dtype(series):
+            numeric_series = _coerce_numeric_for_visualization(series)
+            mask = pd.Series(True, index=filtered_df.index)
+
+            if _filter_value_is_present(filter_item.min):
+                min_value = pd.to_numeric(pd.Series([filter_item.min]), errors="coerce").iloc[0]
+                if pd.notna(min_value):
+                    mask = mask & (numeric_series >= min_value)
+
+            if _filter_value_is_present(filter_item.max):
+                max_value = pd.to_numeric(pd.Series([filter_item.max]), errors="coerce").iloc[0]
+                if pd.notna(max_value):
+                    mask = mask & (numeric_series <= max_value)
+
+            filtered_df = filtered_df.loc[mask.fillna(False)].copy()
+            continue
+
+        selected_values = [
+            _format_chart_label(value)
+            for value in filter_item.values
+            if _filter_value_is_present(value)
+        ]
+        if selected_values:
+            selected_lookup = {str(value) for value in selected_values}
+            labels = series.map(_format_chart_label)
+            filtered_df = filtered_df.loc[labels.isin(selected_lookup)].copy()
+
+    return filtered_df
+
+
+def _build_filter_metadata(
+    df: pd.DataFrame,
+    column_profiles: list[dict[str, object]],
+    visual_df: pd.DataFrame,
+) -> list[dict[str, object]]:
+    filters: list[dict[str, object]] = []
+
+    for profile in column_profiles:
+        column = str(profile["name"])
+        inferred_type = str(profile["type"])
+        if column not in df.columns:
+            continue
+
+        if inferred_type == "datetime":
+            values = _coerce_datetime_for_visualization(visual_df[column]).dropna()
+            filters.append(
+                {
+                    "column": column,
+                    "type": "datetime",
+                    "start": values.min().date().isoformat() if not values.empty else None,
+                    "end": values.max().date().isoformat() if not values.empty else None,
+                }
+            )
+            continue
+
+        if inferred_type == "numeric":
+            values = _coerce_numeric_for_visualization(visual_df[column]).dropna()
+            filters.append(
+                {
+                    "column": column,
+                    "type": "numeric",
+                    "min": _chart_number(values.min(), 3) if not values.empty else None,
+                    "max": _chart_number(values.max(), 3) if not values.empty else None,
+                }
+            )
+            continue
+
+        if inferred_type in {"categorical", "boolean"}:
+            values = df[column].dropna().map(_format_chart_label)
+            options = values.value_counts().head(80)
+            filters.append(
+                {
+                    "column": column,
+                    "type": "categorical",
+                    "options": [
+                        {"label": str(label), "count": int(count)}
+                        for label, count in options.items()
+                    ],
+                }
+            )
+
+    return filters
+
+
+def _column_has_boolean_name_hint(column_name: str) -> bool:
+    normalized = _normalize_column_name(column_name)
+    tokens = set(normalized.split("_"))
+    return any(hint in tokens or normalized.startswith(f"{hint}_") for hint in BOOLEAN_COLUMN_HINTS)
+
+
+def _coerce_numeric_for_visualization(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return pd.Series(np.nan, index=series.index, dtype="float64")
+
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    sanitized = _sanitize_numeric_strings(series).str.replace("%", "", regex=False)
+    return pd.to_numeric(sanitized, errors="coerce")
+
+
+def _coerce_datetime_for_visualization(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+
+    try:
+        return pd.to_datetime(series, errors="coerce", format="mixed")
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, errors="coerce")
+
+
+def _looks_like_boolean_for_visualization(column_name: str, series: pd.Series) -> bool:
+    if pd.api.types.is_bool_dtype(series):
+        return True
+
+    values = series.dropna()
+    if values.empty:
+        return False
+
+    normalized_values = values.astype(str).str.strip().str.lower()
+    unique_values = set(normalized_values.unique())
+    boolean_words = BOOLEAN_TRUE_VALUES | BOOLEAN_FALSE_VALUES
+
+    if unique_values and unique_values.issubset(boolean_words - {"0", "1"}):
+        return len(unique_values) <= 2
+
+    if unique_values and unique_values.issubset({"0", "1"}):
+        return len(unique_values) <= 2 and _column_has_boolean_name_hint(column_name)
+
+    return False
+
+
+def _looks_like_datetime_for_visualization(column_name: str, series: pd.Series) -> bool:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return True
+
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return False
+
+    values = series.dropna().astype(str).str.strip()
+    if values.empty:
+        return False
+
+    normalized_name = _normalize_column_name(column_name)
+    name_hint = any(
+        keyword in normalized_name
+        for keyword in ("date", "time", "day", "month", "year", "created", "updated", "timestamp")
     )
-    top_categories: dict[str, object] | None = None
-    for column in categorical_columns:
-        values = df[column].dropna().astype(str)
+    sample = values.head(40)
+    date_pattern = (
+        r"(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4})|"
+        r"(?:[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})|"
+        r"(?:\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})"
+    )
+    pattern_ratio = float(sample.str.contains(date_pattern, regex=True, case=False).mean())
+    if not name_hint and pattern_ratio < 0.5:
+        return False
+
+    parsed = _coerce_datetime_for_visualization(series)
+    parse_ratio = float(parsed.notna().sum()) / float(len(values))
+    return parse_ratio >= (0.65 if name_hint else 0.75)
+
+
+def _infer_visual_column_profiles(df: pd.DataFrame) -> tuple[list[dict[str, object]], pd.DataFrame]:
+    visual_df = df.copy()
+    profiles: list[dict[str, object]] = []
+    row_count = int(df.shape[0])
+
+    for column in df.columns:
+        series = df[column]
+        missing_values = int(series.isna().sum())
+        non_null_values = int(series.notna().sum())
+        unique_values = int(series.nunique(dropna=True))
+        inferred_type = "unknown"
+
+        if non_null_values > 0:
+            numeric_series = _coerce_numeric_for_visualization(series)
+            numeric_ratio = float(numeric_series.notna().sum()) / float(non_null_values)
+
+            if _looks_like_boolean_for_visualization(str(column), series):
+                inferred_type = "boolean"
+            elif _looks_like_datetime_for_visualization(str(column), series):
+                inferred_type = "datetime"
+                visual_df[column] = _coerce_datetime_for_visualization(series)
+            elif (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)) or numeric_ratio >= 0.85:
+                inferred_type = "numeric"
+                visual_df[column] = numeric_series
+            else:
+                categorical_limit = min(60, max(12, int(max(row_count, 1) * 0.45)))
+                inferred_type = "categorical" if unique_values <= categorical_limit else "text"
+
+        profiles.append(
+            {
+                "name": str(column),
+                "type": inferred_type,
+                "dtype": str(visual_df[column].dtype),
+                "missing_values": missing_values,
+                "non_null_values": non_null_values,
+                "unique_values": unique_values,
+            }
+        )
+
+    return profiles, visual_df
+
+
+def _visual_type_groups(profiles: list[dict[str, object]]) -> dict[str, list[str]]:
+    return {
+        "numeric": [str(profile["name"]) for profile in profiles if profile["type"] == "numeric"],
+        "datetime": [str(profile["name"]) for profile in profiles if profile["type"] == "datetime"],
+        "categorical": [str(profile["name"]) for profile in profiles if profile["type"] == "categorical"],
+        "text": [str(profile["name"]) for profile in profiles if profile["type"] == "text"],
+        "boolean": [str(profile["name"]) for profile in profiles if profile["type"] == "boolean"],
+        "unknown": [str(profile["name"]) for profile in profiles if profile["type"] == "unknown"],
+    }
+
+
+def _profile_type_map(profiles: list[dict[str, object]]) -> dict[str, str]:
+    return {str(profile["name"]): str(profile["type"]) for profile in profiles}
+
+
+def _normalize_visual_aggregation(aggregation: str | None) -> str:
+    normalized = str(aggregation or "count").lower().strip()
+    aliases = {
+        "avg": "average",
+        "mean": "average",
+        "median": "average",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"count", "sum", "average", "min", "max"} else "count"
+
+
+def _aggregate_values_for_visualization(values: pd.Series, aggregation: str) -> object:
+    normalized = _normalize_visual_aggregation(aggregation)
+    if normalized == "sum":
+        return values.sum()
+    if normalized == "average":
+        return values.mean()
+    if normalized == "min":
+        return values.min()
+    if normalized == "max":
+        return values.max()
+    return values.count()
+
+
+def _chart_number(value: object, digits: int = 3) -> float | int | None:
+    rounded = _round_or_none(value, digits)
+    if rounded is None:
+        return None
+    return int(rounded) if float(rounded).is_integer() else rounded
+
+
+def _format_chart_label(value: object) -> str:
+    safe_value = _json_safe(value)
+    if safe_value is None:
+        return "Missing"
+    if isinstance(safe_value, str):
+        return safe_value[:80]
+    return str(safe_value)[:80]
+
+
+def _build_apex_options(
+    chart_id: str,
+    title: str,
+    subtitle: str,
+    categories: list[str] | None = None,
+    labels: list[str] | None = None,
+    xaxis_type: str = "category",
+) -> dict[str, object]:
+    options: dict[str, object] = {
+        "chart": {
+            "id": chart_id,
+            "background": "transparent",
+            "foreColor": "#dbe7e1",
+            "toolbar": {"show": False},
+            "zoom": {"enabled": False},
+            "animations": {"enabled": True},
+        },
+        "theme": {"mode": "dark"},
+        "colors": APEX_CHART_COLORS,
+        "title": {
+            "text": title,
+            "style": {"fontSize": "15px", "fontWeight": 800, "color": "#f4fbf8"},
+        },
+        "subtitle": {
+            "text": subtitle,
+            "style": {"fontSize": "12px", "color": "#9fb1a8"},
+        },
+        "dataLabels": {"enabled": False},
+        "grid": {"borderColor": "rgba(219, 231, 225, 0.12)", "strokeDashArray": 4},
+        "legend": {"labels": {"colors": "#dbe7e1"}},
+        "stroke": {"curve": "smooth", "width": 3},
+        "tooltip": {"theme": "dark"},
+        "noData": {"text": "No compatible data available"},
+    }
+
+    if categories is not None:
+        options["xaxis"] = {
+            "type": xaxis_type,
+            "categories": categories if xaxis_type == "category" else None,
+            "labels": {
+                "style": {"colors": "#9fb1a8"},
+                "rotate": -35,
+                "trim": True,
+            },
+        }
+        options["yaxis"] = {"labels": {"style": {"colors": "#9fb1a8"}}}
+
+    if labels is not None:
+        options["labels"] = labels
+        options["legend"] = {
+            "position": "bottom",
+            "labels": {"colors": "#dbe7e1"},
+        }
+
+    return options
+
+
+def _empty_apex_chart(
+    chart_id: str,
+    chart_type: str,
+    title: str,
+    message: str,
+    x_axis: str | None = None,
+    y_axis: str | None = None,
+    aggregation: str = "count",
+) -> dict[str, object]:
+    apex_type = "bar" if chart_type == "histogram" else chart_type
+    if apex_type not in {"bar", "line", "area", "pie", "donut", "scatter"}:
+        apex_type = "bar"
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": message,
+        "type": apex_type,
+        "chart_type": chart_type,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "aggregation": _normalize_visual_aggregation(aggregation),
+        "series": [],
+        "options": _build_apex_options(chart_id, title, message),
+        "empty": True,
+    }
+
+
+def _dimension_pairs(
+    df: pd.DataFrame,
+    x_axis: str,
+    y_axis: str | None,
+    aggregation: str,
+    limit: int = 14,
+) -> list[tuple[str, object]]:
+    normalized_aggregation = _normalize_visual_aggregation(aggregation)
+    labels = df[x_axis].map(_format_chart_label)
+
+    if normalized_aggregation == "count" or not y_axis or y_axis not in df.columns:
+        counts = labels.value_counts(dropna=False).head(limit)
+        return [(str(label), int(value)) for label, value in counts.items()]
+
+    numeric_values = _coerce_numeric_for_visualization(df[y_axis])
+    working = pd.DataFrame({"x": labels, "y": numeric_values}).dropna(subset=["y"])
+    if working.empty:
+        return []
+
+    grouped = (
+        working.groupby("x")["y"]
+        .agg(lambda values: _aggregate_values_for_visualization(values, normalized_aggregation))
+        .sort_values(ascending=False)
+        .head(limit)
+    )
+    return [(str(label), value) for label, value in grouped.items()]
+
+
+def _build_dimension_apex_chart(
+    df: pd.DataFrame,
+    chart_id: str,
+    chart_type: str,
+    x_axis: str,
+    y_axis: str | None,
+    aggregation: str,
+    title: str,
+    description: str,
+) -> dict[str, object]:
+    pairs = _dimension_pairs(df, x_axis, y_axis, aggregation)
+    if not pairs:
+        return _empty_apex_chart(chart_id, chart_type, title, description, x_axis, y_axis, aggregation)
+
+    labels = [label for label, _ in pairs]
+    values = [_chart_number(value, 2) for _, value in pairs]
+    values = [value for value in values if value is not None]
+    normalized_aggregation = _normalize_visual_aggregation(aggregation)
+
+    if chart_type in {"pie", "donut"}:
+        options = _build_apex_options(chart_id, title, description, labels=labels)
+        if chart_type == "donut":
+            options["plotOptions"] = {"pie": {"donut": {"size": "62%"}}}
+        series: object = values
+    else:
+        options = _build_apex_options(chart_id, title, description, categories=labels)
+        series = [{"name": "Records" if normalized_aggregation == "count" else str(y_axis), "data": values}]
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "type": chart_type,
+        "chart_type": chart_type,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "aggregation": normalized_aggregation,
+        "series": series,
+        "options": options,
+        "empty": False,
+    }
+
+
+def _build_time_apex_chart(
+    df: pd.DataFrame,
+    chart_id: str,
+    chart_type: str,
+    x_axis: str,
+    y_axis: str,
+    aggregation: str,
+    title: str,
+    description: str,
+) -> dict[str, object]:
+    normalized_aggregation = _normalize_visual_aggregation(aggregation if aggregation != "count" else "average")
+    x_values = _coerce_datetime_for_visualization(df[x_axis])
+    y_values = _coerce_numeric_for_visualization(df[y_axis])
+    working = pd.DataFrame({"x": x_values, "y": y_values}).dropna()
+    if working.empty:
+        return _empty_apex_chart(chart_id, chart_type, title, description, x_axis, y_axis, aggregation)
+
+    working["bucket"] = working["x"].dt.floor("D")
+    grouped = (
+        working.groupby("bucket")["y"]
+        .agg(lambda values: _aggregate_values_for_visualization(values, normalized_aggregation))
+        .sort_index()
+        .tail(60)
+    )
+    data = [
+        {"x": date_value.isoformat(), "y": _chart_number(value, 2)}
+        for date_value, value in grouped.items()
+    ]
+
+    options = _build_apex_options(chart_id, title, description, categories=[], xaxis_type="datetime")
+    options["xaxis"] = {
+        "type": "datetime",
+        "labels": {"style": {"colors": "#9fb1a8"}},
+    }
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "type": "area" if chart_type == "area" else "line",
+        "chart_type": chart_type,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "aggregation": normalized_aggregation,
+        "series": [{"name": y_axis, "data": data}],
+        "options": options,
+        "empty": False,
+    }
+
+
+def _build_sequence_line_chart(
+    df: pd.DataFrame,
+    chart_id: str,
+    chart_type: str,
+    y_axis: str,
+    title: str,
+    description: str,
+) -> dict[str, object]:
+    values = _coerce_numeric_for_visualization(df[y_axis]).dropna().head(60).reset_index(drop=True)
+    if values.empty:
+        return _empty_apex_chart(chart_id, chart_type, title, description, None, y_axis, "average")
+
+    data = [{"x": int(index + 1), "y": _chart_number(value, 2)} for index, value in values.items()]
+    options = _build_apex_options(chart_id, title, description, categories=[])
+    options["xaxis"] = {
+        "type": "numeric",
+        "title": {"text": "Row index", "style": {"color": "#9fb1a8"}},
+        "labels": {"style": {"colors": "#9fb1a8"}},
+    }
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "type": "area" if chart_type == "area" else "line",
+        "chart_type": chart_type,
+        "x_axis": None,
+        "y_axis": y_axis,
+        "aggregation": "average",
+        "series": [{"name": y_axis, "data": data}],
+        "options": options,
+        "empty": False,
+    }
+
+
+def _build_scatter_apex_chart(
+    df: pd.DataFrame,
+    chart_id: str,
+    x_axis: str,
+    y_axis: str,
+    title: str,
+    description: str,
+) -> dict[str, object]:
+    x_values = _coerce_numeric_for_visualization(df[x_axis])
+    y_values = _coerce_numeric_for_visualization(df[y_axis])
+    working = pd.DataFrame({"x": x_values, "y": y_values}).dropna().head(250)
+    if working.empty:
+        return _empty_apex_chart(chart_id, "scatter", title, description, x_axis, y_axis)
+
+    data = [
+        {"x": _chart_number(row.x, 3), "y": _chart_number(row.y, 3)}
+        for row in working.itertuples(index=False)
+    ]
+    options = _build_apex_options(chart_id, title, description, categories=[])
+    options["xaxis"] = {
+        "type": "numeric",
+        "title": {"text": x_axis, "style": {"color": "#9fb1a8"}},
+        "labels": {"style": {"colors": "#9fb1a8"}},
+    }
+    options["markers"] = {"size": 5, "strokeWidth": 0}
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "type": "scatter",
+        "chart_type": "scatter",
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "aggregation": "none",
+        "series": [{"name": f"{y_axis} vs {x_axis}", "data": data}],
+        "options": options,
+        "empty": False,
+    }
+
+
+def _build_histogram_apex_chart(
+    df: pd.DataFrame,
+    chart_id: str,
+    numeric_column: str,
+    title: str,
+    description: str,
+) -> dict[str, object]:
+    values = _coerce_numeric_for_visualization(df[numeric_column]).dropna()
+    if values.empty:
+        return _empty_apex_chart(chart_id, "histogram", title, description, numeric_column, None)
+
+    unique_values = int(values.nunique())
+    if unique_values <= 1:
+        labels = [_format_chart_label(values.iloc[0])]
+        counts = [int(values.shape[0])]
+    else:
+        bin_count = min(12, max(5, int(np.sqrt(max(len(values), 1)))))
+        buckets = pd.cut(values, bins=bin_count, include_lowest=True, duplicates="drop")
+        distribution = buckets.value_counts(sort=False)
+        labels = [str(interval) for interval in distribution.index]
+        counts = [int(count) for count in distribution.values]
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "type": "bar",
+        "chart_type": "histogram",
+        "x_axis": numeric_column,
+        "y_axis": None,
+        "aggregation": "count",
+        "series": [{"name": "Records", "data": counts}],
+        "options": _build_apex_options(chart_id, title, description, categories=labels),
+        "empty": False,
+    }
+
+
+def _build_custom_apex_chart(
+    df: pd.DataFrame,
+    profiles: list[dict[str, object]],
+    chart_type: str | None,
+    x_axis: str | None,
+    y_axis: str | None,
+    aggregation: str | None,
+    chart_id: str = "custom-chart",
+) -> dict[str, object]:
+    normalized_chart_type = str(chart_type or "bar").lower().strip()
+    normalized_aggregation = _normalize_visual_aggregation(aggregation)
+    profile_types = _profile_type_map(profiles)
+
+    if normalized_chart_type not in VALID_VISUAL_CHART_TYPES:
+        return _empty_apex_chart(
+            chart_id,
+            normalized_chart_type,
+            "Unsupported Chart",
+            "Choose bar, line, area, pie, donut, scatter, or histogram.",
+            x_axis,
+            y_axis,
+            normalized_aggregation,
+        )
+
+    if normalized_chart_type == "histogram":
+        numeric_column = y_axis if y_axis in df.columns and profile_types.get(str(y_axis)) == "numeric" else x_axis
+        if not numeric_column or numeric_column not in df.columns or profile_types.get(str(numeric_column)) != "numeric":
+            return _empty_apex_chart(chart_id, "histogram", "Histogram", "Select a numeric column.", x_axis, y_axis)
+        return _build_histogram_apex_chart(
+            df,
+            chart_id,
+            str(numeric_column),
+            f"Distribution of {numeric_column}",
+            f"Histogram for {numeric_column}.",
+        )
+
+    if normalized_chart_type == "scatter":
+        if not x_axis or not y_axis or x_axis not in df.columns or y_axis not in df.columns:
+            return _empty_apex_chart(chart_id, "scatter", "Scatter Chart", "Select two numeric columns.", x_axis, y_axis)
+        if profile_types.get(str(x_axis)) != "numeric" or profile_types.get(str(y_axis)) != "numeric":
+            return _empty_apex_chart(chart_id, "scatter", "Scatter Chart", "Scatter charts require two numeric columns.", x_axis, y_axis)
+        return _build_scatter_apex_chart(
+            df,
+            chart_id,
+            str(x_axis),
+            str(y_axis),
+            f"{y_axis} vs {x_axis}",
+            "Two numeric columns plotted against each other.",
+        )
+
+    if normalized_chart_type in {"line", "area"}:
+        if y_axis and y_axis in df.columns and profile_types.get(str(y_axis)) == "numeric":
+            if x_axis and x_axis in df.columns and profile_types.get(str(x_axis)) == "datetime":
+                return _build_time_apex_chart(
+                    df,
+                    chart_id,
+                    normalized_chart_type,
+                    str(x_axis),
+                    str(y_axis),
+                    normalized_aggregation,
+                    f"{y_axis} over {x_axis}",
+                    f"{normalized_aggregation.title()} of {y_axis} grouped by {x_axis}.",
+                )
+            if x_axis and x_axis in df.columns:
+                return _build_dimension_apex_chart(
+                    df,
+                    chart_id,
+                    "line",
+                    str(x_axis),
+                    str(y_axis),
+                    normalized_aggregation,
+                    f"{y_axis} by {x_axis}",
+                    f"{normalized_aggregation.title()} of {y_axis} grouped by {x_axis}.",
+                )
+            return _build_sequence_line_chart(
+                df,
+                chart_id,
+                normalized_chart_type,
+                str(y_axis),
+                f"{y_axis} by row order",
+                "Sequential numeric values across row order.",
+            )
+
+        return _empty_apex_chart(chart_id, normalized_chart_type, "Line Chart", "Select a numeric Y-axis column.", x_axis, y_axis)
+
+    if not x_axis or x_axis not in df.columns:
+        return _empty_apex_chart(chart_id, normalized_chart_type, "Category Chart", "Select an X-axis column.", x_axis, y_axis, normalized_aggregation)
+
+    title_measure = "records" if normalized_aggregation == "count" or not y_axis else str(y_axis)
+    return _build_dimension_apex_chart(
+        df,
+        chart_id,
+        normalized_chart_type,
+        str(x_axis),
+        str(y_axis) if y_axis else None,
+        normalized_aggregation,
+        f"{title_measure.title()} by {x_axis}",
+        f"{normalized_aggregation.title()} grouped by {x_axis}.",
+    )
+
+
+def _build_legacy_points_from_chart(chart: dict[str, object]) -> list[dict[str, object]]:
+    series = chart.get("series")
+    if not isinstance(series, list) or not series:
+        return []
+
+    first_series = series[0]
+    if not isinstance(first_series, dict):
+        return []
+
+    data = first_series.get("data")
+    if not isinstance(data, list):
+        return []
+
+    points: list[dict[str, object]] = []
+    for index, item in enumerate(data):
+        if isinstance(item, dict):
+            label = item.get("x", index + 1)
+            value = item.get("y")
+        else:
+            label = index + 1
+            value = item
+
+        chart_value = _chart_number(value, 2)
+        if chart_value is not None:
+            points.append({"label": _format_chart_label(label), "value": chart_value})
+
+    return points
+
+
+def _duplicate_row_count(df: pd.DataFrame) -> int:
+    try:
+        return int(df.duplicated().sum())
+    except TypeError:
+        normalized = df.apply(
+            lambda row: json.dumps([_json_safe(value) for value in row.tolist()], sort_keys=True),
+            axis=1,
+        )
+        return int(normalized.duplicated().sum())
+
+
+def _build_top_category(df: pd.DataFrame, category_candidates: list[str]) -> dict[str, object] | None:
+    best_category: dict[str, object] | None = None
+
+    for column in category_candidates:
+        values = df[column].dropna().map(_format_chart_label)
         if values.empty:
             continue
 
-        counts = values.value_counts().head(6)
-        top_categories = {
+        counts = values.value_counts().head(8)
+        if counts.empty:
+            continue
+
+        top_label, top_count = next(iter(counts.items()))
+        candidate = {
             "column": column,
-            "data": [{"label": label, "value": int(value)} for label, value in counts.items()],
+            "label": str(top_label),
+            "count": int(top_count),
+            "data": [{"label": str(label), "value": int(value)} for label, value in counts.items()],
         }
-        break
 
-    numeric_columns = list(df.select_dtypes(include=["number"]).columns)
-    numeric_distribution: dict[str, object] | None = None
-    trend_line: dict[str, object] | None = None
+        if best_category is None or int(candidate["count"]) > int(best_category["count"]):
+            best_category = candidate
 
-    if numeric_columns:
-        numeric_column = numeric_columns[0]
-        numeric_values = df[numeric_column].dropna()
+    return best_category
 
-        if not numeric_values.empty:
-            bin_count = min(8, max(3, int(numeric_values.nunique())))
-            buckets = pd.cut(
-                numeric_values,
-                bins=bin_count,
-                include_lowest=True,
-                duplicates="drop",
+
+def _semantic_measure_score(column_name: str) -> int:
+    normalized = _normalize_column_name(column_name)
+    score = 0
+    weighted_keywords = {
+        "revenue": 9,
+        "sales": 9,
+        "sale": 9,
+        "amount": 8,
+        "total": 8,
+        "profit": 8,
+        "price": 7,
+        "value": 7,
+        "cost": 6,
+        "quantity": 5,
+        "qty": 5,
+        "score": 4,
+        "rating": 4,
+        "count": 3,
+    }
+
+    for keyword, weight in weighted_keywords.items():
+        if keyword in normalized:
+            score += weight
+
+    if any(token in normalized for token in ("id", "zip", "postal", "phone", "code")):
+        score -= 12
+
+    return score
+
+
+def _semantic_category_score(column_name: str) -> int:
+    normalized = _normalize_column_name(column_name)
+    score = 0
+    weighted_keywords = {
+        "category": 9,
+        "product": 9,
+        "customer": 8,
+        "client": 8,
+        "region": 8,
+        "market": 7,
+        "segment": 7,
+        "department": 6,
+        "city": 6,
+        "country": 6,
+        "state": 5,
+        "type": 5,
+        "status": 4,
+        "name": 4,
+    }
+
+    for keyword, weight in weighted_keywords.items():
+        if keyword in normalized:
+            score += weight
+
+    if any(token in normalized for token in ("id", "email", "phone", "address", "url")):
+        score -= 10
+
+    return score
+
+
+def _rank_numeric_columns(df: pd.DataFrame, numeric_columns: list[str]) -> list[str]:
+    def _score(column: str) -> tuple[int, int, int, str]:
+        series = _coerce_numeric_for_visualization(df[column])
+        non_null = int(series.notna().sum())
+        unique_values = int(series.nunique(dropna=True))
+        return (_semantic_measure_score(column), non_null, unique_values, column)
+
+    return sorted(numeric_columns, key=_score, reverse=True)
+
+
+def _rank_category_columns(df: pd.DataFrame, category_columns: list[str]) -> list[str]:
+    def _score(column: str) -> tuple[int, int, int, str]:
+        series = df[column].dropna().map(_format_chart_label)
+        unique_values = int(series.nunique(dropna=True))
+        non_null = int(series.shape[0])
+        balance_score = -abs(unique_values - min(max(non_null // 4, 2), 24))
+        return (_semantic_category_score(column), balance_score, non_null, column)
+
+    return sorted(category_columns, key=_score, reverse=True)
+
+
+def _format_kpi_number(value: object) -> str:
+    number = _chart_number(value, 2)
+    if number is None:
+        return "N/A"
+    return f"{number:,}" if isinstance(number, int) else f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _format_kpi_date(value: object) -> str:
+    if value is None or pd.isna(value):  # type: ignore[arg-type]
+        return "N/A"
+
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+
+    return str(value)
+
+
+def _build_category_measure_insight(
+    df: pd.DataFrame,
+    category_column: str,
+    numeric_column: str,
+    aggregation: str = "sum",
+) -> dict[str, object] | None:
+    working = pd.DataFrame(
+        {
+            "category": df[category_column].map(_format_chart_label),
+            "measure": _coerce_numeric_for_visualization(df[numeric_column]),
+        }
+    ).dropna(subset=["measure"])
+    if working.empty:
+        return None
+
+    grouped = working.groupby("category")["measure"].agg(
+        lambda values: _aggregate_values_for_visualization(values, aggregation)
+    )
+    grouped = grouped.dropna()
+    if grouped.empty:
+        return None
+
+    top_label = str(grouped.idxmax())
+    top_value = grouped.loc[top_label]
+    return {
+        "label": f"Top {category_column}",
+        "value": top_label,
+        "hint": f"{_format_kpi_number(top_value)} {numeric_column} ({aggregation})",
+        "type": "category_measure",
+        "priority": 96,
+    }
+
+
+def _build_trend_kpi(df: pd.DataFrame, datetime_column: str, numeric_column: str) -> dict[str, object] | None:
+    working = pd.DataFrame(
+        {
+            "date": _coerce_datetime_for_visualization(df[datetime_column]),
+            "measure": _coerce_numeric_for_visualization(df[numeric_column]),
+        }
+    ).dropna()
+    if working.empty:
+        return None
+
+    working["bucket"] = working["date"].dt.floor("D")
+    grouped = working.groupby("bucket")["measure"].sum().sort_index()
+    grouped = grouped[grouped.notna()]
+    if len(grouped) < 2:
+        return None
+
+    first_value = float(grouped.iloc[0])
+    last_value = float(grouped.iloc[-1])
+    if first_value == 0:
+        delta_label = "New activity"
+    else:
+        delta = ((last_value - first_value) / abs(first_value)) * 100
+        delta_label = f"{delta:+.1f}%"
+
+    direction = "up" if last_value > first_value else "down" if last_value < first_value else "flat"
+    return {
+        "label": f"{numeric_column} Trend",
+        "value": delta_label,
+        "hint": f"{direction.title()} from {_format_kpi_date(grouped.index[0])} to {_format_kpi_date(grouped.index[-1])}",
+        "type": "trend",
+        "priority": 82,
+    }
+
+
+def _build_insight_kpis(
+    df: pd.DataFrame,
+    numeric_columns: list[str],
+    category_candidates: list[str],
+    datetime_columns: list[str],
+    top_category: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    kpis: list[dict[str, object]] = []
+    ranked_numeric = _rank_numeric_columns(df, numeric_columns)
+    ranked_categories = _rank_category_columns(df, category_candidates)
+
+    if ranked_categories and ranked_numeric:
+        top_category_measure = _build_category_measure_insight(df, ranked_categories[0], ranked_numeric[0], "sum")
+        if top_category_measure:
+            kpis.append(top_category_measure)
+
+    if ranked_numeric:
+        primary_numeric = ranked_numeric[0]
+        series = _coerce_numeric_for_visualization(df[primary_numeric]).dropna()
+        if not series.empty:
+            kpis.extend(
+                [
+                    {
+                        "label": f"Total {primary_numeric}",
+                        "value": _format_kpi_number(series.sum()),
+                        "hint": f"Across {int(series.count()):,} valid records",
+                        "type": "total",
+                        "priority": 92,
+                    },
+                    {
+                        "label": f"Average {primary_numeric}",
+                        "value": _format_kpi_number(series.mean()),
+                        "hint": f"Typical value for {primary_numeric}",
+                        "type": "average",
+                        "priority": 80,
+                    },
+                    {
+                        "label": f"Highest {primary_numeric}",
+                        "value": _format_kpi_number(series.max()),
+                        "hint": "Maximum observed value",
+                        "type": "maximum",
+                        "priority": 76,
+                    },
+                    {
+                        "label": f"Lowest {primary_numeric}",
+                        "value": _format_kpi_number(series.min()),
+                        "hint": "Minimum observed value",
+                        "type": "minimum",
+                        "priority": 58,
+                    },
+                ]
             )
-            distribution = buckets.value_counts(sort=False)
-            numeric_distribution = {
-                "column": numeric_column,
-                "data": [
-                    {"label": str(interval), "value": int(count)}
-                    for interval, count in distribution.items()
-                ],
-            }
 
-        datetime_columns = list(df.select_dtypes(include=["datetime", "datetimetz"]).columns)
-        if datetime_columns:
-            datetime_column = datetime_columns[0]
-            trend_df = df[[datetime_column, numeric_column]].dropna().sort_values(datetime_column)
-            if not trend_df.empty:
-                grouped = (
-                    trend_df.groupby(trend_df[datetime_column].dt.date)[numeric_column]
-                    .mean()
-                    .head(30)
-                )
-                trend_line = {
-                    "x_label": datetime_column,
-                    "y_label": numeric_column,
-                    "data": [
-                        {"label": date_value.isoformat(), "value": _round_or_none(value, 2)}
-                        for date_value, value in grouped.items()
-                    ],
-                }
-        else:
-            sequence = numeric_values.head(30).reset_index(drop=True)
-            trend_line = {
-                "x_label": "Row Index",
-                "y_label": numeric_column,
-                "data": [
-                    {"label": str(index + 1), "value": _round_or_none(value, 2)}
-                    for index, value in sequence.items()
-                ],
+    if top_category:
+        kpis.append(
+            {
+                "label": f"Most Frequent {top_category['column']}",
+                "value": top_category["label"],
+                "hint": f"{int(top_category['count']):,} records",
+                "type": "mode",
+                "priority": 86,
             }
+        )
+
+    if ranked_categories:
+        category_column = ranked_categories[0]
+        values = df[category_column].dropna().map(_format_chart_label)
+        if not values.empty:
+            kpis.append(
+                {
+                    "label": f"Unique {category_column}",
+                    "value": f"{int(values.nunique()):,}",
+                    "hint": "Distinct categories detected",
+                    "type": "unique_categories",
+                    "priority": 50,
+                }
+            )
+
+    if datetime_columns:
+        primary_date = datetime_columns[0]
+        date_values = _coerce_datetime_for_visualization(df[primary_date]).dropna()
+        if not date_values.empty:
+            kpis.append(
+                {
+                    "label": f"Latest {primary_date}",
+                    "value": _format_kpi_date(date_values.max()),
+                    "hint": "Most recent record date",
+                    "type": "latest_date",
+                    "priority": 84,
+                }
+            )
+
+    if datetime_columns and ranked_numeric:
+        trend_kpi = _build_trend_kpi(df, datetime_columns[0], ranked_numeric[0])
+        if trend_kpi:
+            kpis.append(trend_kpi)
+
+    kpis.append(
+        {
+            "label": "Total Records",
+            "value": f"{int(df.shape[0]):,}",
+            "hint": "Rows in the cleaned dataset",
+            "type": "records",
+            "priority": 20,
+        }
+    )
+
+    deduped: dict[tuple[str, str], dict[str, object]] = {}
+    for kpi in kpis:
+        key = (str(kpi["label"]), str(kpi["value"]))
+        existing = deduped.get(key)
+        if existing is None or int(kpi["priority"]) > int(existing["priority"]):
+            deduped[key] = kpi
+
+    return [
+        {key: value for key, value in kpi.items() if key != "priority"}
+        for kpi in sorted(deduped.values(), key=lambda item: int(item["priority"]), reverse=True)[:8]
+    ]
+
+
+def _build_visualization_payload(
+    df: pd.DataFrame,
+    override: VisualizationOverridePayload | None = None,
+) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    column_profiles, visual_df = _infer_visual_column_profiles(df)
+    type_groups = _visual_type_groups(column_profiles)
+    filter_metadata = _build_filter_metadata(df, column_profiles, visual_df)
+    numeric_columns = type_groups["numeric"]
+    datetime_columns = type_groups["datetime"]
+    category_candidates = [
+        *type_groups["categorical"],
+        *type_groups["boolean"],
+        *type_groups["text"],
+    ]
+    warnings: list[str] = []
+
+    missing_values = [
+        {"label": str(column), "value": int(df[column].isna().sum())} for column in df.columns
+    ]
+    top_category = _build_top_category(visual_df, category_candidates)
+    top_categories = (
+        {
+            "column": top_category["column"],
+            "data": top_category["data"],
+        }
+        if top_category
+        else None
+    )
+    averages = [
+        {"column": column, "average": _round_or_none(_coerce_numeric_for_visualization(visual_df[column]).mean(), 2)}
+        for column in numeric_columns[:6]
+    ]
+    ranked_numeric_columns = _rank_numeric_columns(visual_df, numeric_columns)
+    ranked_category_columns = _rank_category_columns(visual_df, category_candidates)
+    insight_kpis = _build_insight_kpis(
+        visual_df,
+        numeric_columns=numeric_columns,
+        category_candidates=category_candidates,
+        datetime_columns=datetime_columns,
+        top_category=top_category,
+    )
+
+    chart_configs: list[dict[str, object]] = []
+
+    if datetime_columns and ranked_numeric_columns:
+        chart_configs.append(
+            _build_time_apex_chart(
+                visual_df,
+                "auto-date-line",
+                "line",
+                datetime_columns[0],
+                ranked_numeric_columns[0],
+                "average",
+                f"{ranked_numeric_columns[0]} over {datetime_columns[0]}",
+                "Date plus numeric column detected.",
+            )
+        )
+
+    if ranked_category_columns and ranked_numeric_columns:
+        chart_configs.append(
+            _build_dimension_apex_chart(
+                visual_df,
+                "auto-category-measure-bar",
+                "bar",
+                ranked_category_columns[0],
+                ranked_numeric_columns[0],
+                "sum",
+                f"{ranked_numeric_columns[0]} by {ranked_category_columns[0]}",
+                "Top categories by numeric performance.",
+            )
+        )
+
+    if ranked_category_columns:
+        chart_configs.append(
+            _build_dimension_apex_chart(
+                visual_df,
+                "auto-category-bar",
+                "bar",
+                ranked_category_columns[0],
+                None,
+                "count",
+                f"Records by {ranked_category_columns[0]}",
+                "Categorical/text distribution detected.",
+            )
+        )
+        chart_configs.append(
+            _build_dimension_apex_chart(
+                visual_df,
+                "auto-category-donut",
+                "donut",
+                ranked_category_columns[1] if len(ranked_category_columns) > 1 else ranked_category_columns[0],
+                None,
+                "count",
+                "Category Share",
+                "Donut chart for category distribution.",
+            )
+        )
+
+    if len(ranked_numeric_columns) >= 2:
+        chart_configs.append(
+            _build_scatter_apex_chart(
+                visual_df,
+                "auto-numeric-scatter",
+                ranked_numeric_columns[0],
+                ranked_numeric_columns[1],
+                f"{ranked_numeric_columns[1]} vs {ranked_numeric_columns[0]}",
+                "Two numeric columns detected.",
+            )
+        )
+
+    if ranked_numeric_columns:
+        chart_configs.append(
+            _build_histogram_apex_chart(
+                visual_df,
+                "auto-numeric-histogram",
+                ranked_numeric_columns[0],
+                f"Distribution of {ranked_numeric_columns[0]}",
+                "Numeric column distribution detected.",
+            )
+        )
+
+    if not chart_configs:
+        warnings.append("No chart-ready column combinations were found.")
+
+    custom_chart = None
+    if override is not None:
+        custom_chart = _build_custom_apex_chart(
+            visual_df,
+            column_profiles,
+            chart_type=override.chart_type,
+            x_axis=override.x_axis,
+            y_axis=override.y_axis,
+            aggregation=override.aggregation,
+            chart_id="custom-chart",
+        )
+
+    trend_chart = next(
+        (chart for chart in chart_configs if chart.get("chart_type") in {"line", "area"} and not chart.get("empty")),
+        None,
+    )
+    trend_line = (
+        {
+            "x_label": trend_chart.get("x_axis") or "Row Index",
+            "y_label": trend_chart.get("y_axis"),
+            "data": _build_legacy_points_from_chart(trend_chart),
+        }
+        if trend_chart
+        else None
+    )
+    if trend_line is None and ranked_numeric_columns:
+        sequence_chart = _build_sequence_line_chart(
+            visual_df,
+            "legacy-sequence-line",
+            "line",
+            ranked_numeric_columns[0],
+            f"{ranked_numeric_columns[0]} by row order",
+            "Sequential numeric values across row order.",
+        )
+        trend_line = {
+            "x_label": "Row Index",
+            "y_label": ranked_numeric_columns[0],
+            "data": _build_legacy_points_from_chart(sequence_chart),
+        }
+
+    histogram_chart = next(
+        (chart for chart in chart_configs if chart.get("chart_type") == "histogram" and not chart.get("empty")),
+        None,
+    )
+    numeric_distribution = (
+        {
+            "column": histogram_chart.get("x_axis"),
+            "data": [
+                {"label": label, "value": value}
+                for label, value in zip(
+                    ((histogram_chart.get("options") or {}).get("xaxis") or {}).get("categories") or [],
+                    ((histogram_chart.get("series") or [{}])[0].get("data") if histogram_chart.get("series") else []) or [],
+                )
+            ],
+        }
+        if histogram_chart
+        else None
+    )
+
+    full_df = df.where(pd.notna(df), None)
+    table_rows = _json_safe(full_df.to_dict(orient="records"))
+    summary = {
+        "total_rows": int(df.shape[0]),
+        "total_columns": int(df.shape[1]),
+        "missing_values": int(df.isna().sum().sum()) if df.shape[1] else 0,
+        "duplicate_rows": _duplicate_row_count(df) if not df.empty else 0,
+        "top_category": (
+            {
+                "column": top_category["column"],
+                "label": top_category["label"],
+                "count": top_category["count"],
+            }
+            if top_category
+            else None
+        ),
+        "averages": averages,
+    }
 
     return {
+        "summary": summary,
+        "kpis": insight_kpis,
+        "insight_kpis": insight_kpis,
+        "columns": column_profiles,
+        "column_types": type_groups,
+        "filters": filter_metadata,
+        "chart_configs": chart_configs,
+        "charts": chart_configs,
+        "custom_chart": custom_chart,
+        "table": {
+            "columns": list(df.columns),
+            "rows": table_rows,
+            "total_rows": int(df.shape[0]),
+        },
+        "warnings": warnings,
         "missing_values": missing_values,
         "top_categories": top_categories,
         "numeric_distribution": numeric_distribution,
@@ -865,6 +2224,8 @@ def _row_to_safe_dict(df: pd.DataFrame, row_label: object, columns: list[str]) -
 
 
 def _build_comparison(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, limit: int = 40) -> dict[str, object]:
+    raw_df = _get_user_visible_dataframe(raw_df)
+    cleaned_df = _get_user_visible_dataframe(cleaned_df)
     columns = list(dict.fromkeys([*list(raw_df.columns), *list(cleaned_df.columns)]))
     row_labels = list(dict.fromkeys([*list(raw_df.index), *list(cleaned_df.index)]))
     preview_limit = min(limit, len(row_labels))
@@ -925,6 +2286,7 @@ def _build_comparison(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, limit: int
 
 
 def _get_chart_options(df: pd.DataFrame) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
     numeric_columns = list(df.select_dtypes(include=["number"]).columns)
     datetime_columns = list(df.select_dtypes(include=["datetime", "datetimetz"]).columns)
     categorical_columns = list(
@@ -982,6 +2344,7 @@ def _build_selectable_chart(
     measure: str | None,
     aggregation: str,
 ) -> dict[str, object]:
+    df = _get_user_visible_dataframe(df)
     normalized_chart_type = chart_type.lower().strip()
     if normalized_chart_type not in {"bar", "line", "pie"}:
         raise HTTPException(status_code=400, detail="Invalid chart_type. Use bar, line, or pie")
@@ -1077,33 +2440,69 @@ def _build_updated_dataframe(
     for row in rows:
         normalized_rows.append(
             {
-                column: None if row.get(column) == "" else row.get(column)
+                column: _normalize_nullable_value(row.get(column))
                 for column in normalized_columns
             }
         )
 
     updated_df = pd.DataFrame(normalized_rows, columns=normalized_columns)
+    critical_columns = [
+        column
+        for column in normalized_columns
+        if _column_matches_keywords(column, tuple(DEFAULT_CLEANING_CONFIG["critical_keywords"]))  # type: ignore[arg-type]
+    ]
+
+    for column in critical_columns:
+        missing_rows = updated_df.index[updated_df[column].isna()].tolist()
+        if missing_rows:
+            row_numbers = ", ".join(str(index + 1) for index in missing_rows[:5])
+            raise HTTPException(
+                status_code=400,
+                detail=f"{column} is required. Missing value found on row(s): {row_numbers}",
+            )
 
     for column in normalized_columns:
-        if column not in previous_df.columns:
-            continue
-
-        previous_series = previous_df[column]
+        previous_series = previous_df[column] if column in previous_df.columns else None
         updated_series = updated_df[column]
         non_null_count = int(updated_series.notna().sum())
         if non_null_count == 0:
             continue
 
-        if pd.api.types.is_numeric_dtype(previous_series):
+        if _is_numeric_input_column(column, previous_series):
             parsed = pd.to_numeric(updated_series, errors="coerce")
-            if float(parsed.notna().sum()) / float(non_null_count) >= 0.8:
+            invalid_mask = updated_series.notna() & parsed.isna()
+            if bool(invalid_mask.any()):
+                row_numbers = ", ".join(str(index + 1) for index in updated_df.index[invalid_mask][:5])
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{column} must be numeric. Invalid value found on row(s): {row_numbers}",
+                )
+
+            if _normalize_column_name(column) == "age":
+                non_integer_mask = parsed.notna() & (parsed % 1 != 0)
+                negative_mask = parsed.notna() & (parsed < 0)
+                invalid_age_mask = non_integer_mask | negative_mask
+                if bool(invalid_age_mask.any()):
+                    row_numbers = ", ".join(str(index + 1) for index in updated_df.index[invalid_age_mask][:5])
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{column} must be a non-negative whole number. Invalid value found on row(s): {row_numbers}",
+                    )
+                updated_df[column] = parsed.astype("Int64")
+            else:
                 updated_df[column] = parsed
             continue
 
-        if pd.api.types.is_datetime64_any_dtype(previous_series):
+        if previous_series is not None and pd.api.types.is_datetime64_any_dtype(previous_series):
             parsed = pd.to_datetime(updated_series, errors="coerce")
-            if float(parsed.notna().sum()) / float(non_null_count) >= 0.8:
-                updated_df[column] = parsed
+            invalid_mask = updated_series.notna() & parsed.isna()
+            if bool(invalid_mask.any()):
+                row_numbers = ", ".join(str(index + 1) for index in updated_df.index[invalid_mask][:5])
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{column} must be a valid date/time. Invalid value found on row(s): {row_numbers}",
+                )
+            updated_df[column] = parsed
 
     return updated_df
 
@@ -1175,6 +2574,24 @@ def get_dataset_table(
         "stage": resolved_stage,
         "table": _build_table_page(df, page=page, page_size=page_size),
     }
+
+
+@app.get("/datasets/{dataset_id}/export")
+def export_dataset(
+    dataset_id: str,
+    stage: str = "cleaned",
+) -> Response:
+    dataset = _get_dataset(dataset_id)
+    df, resolved_stage = _select_dataframe(dataset, stage)
+    export_df = _get_user_visible_dataframe(df)
+    csv_content = export_df.to_csv(index=False)
+    filename = _safe_export_filename(dataset.get("filename"), resolved_stage)
+
+    return Response(
+        content=csv_content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/datasets/{dataset_id}/state")
@@ -1276,12 +2693,50 @@ def visualize_dataset(dataset_id: str, stage: str = "latest") -> dict[str, objec
     dataset = _get_dataset(dataset_id)
     df, resolved_stage = _select_dataframe(dataset, stage)
 
+    visualization = _build_visualization_payload(df)
     return {
         "dataset_id": dataset_id,
         "stage": resolved_stage,
-        "charts": _build_visualization_payload(df),
+        "charts": visualization,
+        "visualization": visualization,
         "options": _get_chart_options(df),
     }
+
+
+@app.post("/api/visualize")
+def visualize_cleaned_dataset(payload: VisualizationDatasetPayload) -> dict[str, object]:
+    df = _build_dataframe_from_visualization_payload(payload)
+    return _build_visualization_payload(df, override=payload.override)
+
+
+@app.post("/api/filter")
+def filter_visualization_dataset(payload: VisualizationDatasetPayload) -> dict[str, object]:
+    df = _build_dataframe_from_visualization_payload(payload)
+    filtered_df = _apply_visualization_filters(df, payload.filters)
+    visualization = _build_visualization_payload(filtered_df, override=payload.override)
+    column_profiles = visualization.get("columns")
+
+    custom_charts: list[dict[str, object]] = []
+    if isinstance(column_profiles, list):
+        for chart_override in payload.chart_overrides:
+            custom_chart = _build_custom_apex_chart(
+                _get_user_visible_dataframe(filtered_df),
+                column_profiles,
+                chart_type=chart_override.chart_type,
+                x_axis=chart_override.x_axis,
+                y_axis=chart_override.y_axis,
+                aggregation=chart_override.aggregation,
+                chart_id=chart_override.id,
+            )
+            custom_chart["id"] = chart_override.id
+            if chart_override.source:
+                custom_chart["source"] = chart_override.source
+            custom_charts.append(custom_chart)
+
+    visualization["custom_charts"] = custom_charts
+    visualization["active_filters"] = _json_safe([filter_item.model_dump() for filter_item in payload.filters])
+    visualization["filtered_rows"] = int(filtered_df.shape[0])
+    return visualization
 
 
 @app.get("/datasets/{dataset_id}/compare")

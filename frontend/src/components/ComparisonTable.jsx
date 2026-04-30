@@ -60,11 +60,11 @@ function ComparisonTable({ comparison }) {
                     >
                       <div>
                         <span>Original</span>
-                        <strong>{formatValue(row.raw?.[column])}</strong>
+                        <strong>{formatValue(row.raw?.[column], { empty: 'Not provided' })}</strong>
                       </div>
                       <div>
                         <span>Cleaned</span>
-                        <strong>{formatValue(row.cleaned?.[column])}</strong>
+                        <strong>{formatValue(row.cleaned?.[column], { empty: 'Not provided' })}</strong>
                       </div>
                     </td>
                   )

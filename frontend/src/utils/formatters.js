@@ -1,6 +1,6 @@
-export function formatValue(value) {
+export function formatValue(value, options = {}) {
   if (value === null || value === undefined || value === '') {
-    return '-'
+    return options.empty ?? '-'
   }
 
   if (typeof value === 'number') {

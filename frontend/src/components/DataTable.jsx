@@ -24,7 +24,7 @@ function DataTable({ title, columns = [], rows = [], emptyMessage = 'No rows to 
               {rows.map((row, rowIndex) => (
                 <tr key={`${title}-row-${rowIndex}`}>
                   {columns.map((column) => (
-                    <td key={`${column}-${rowIndex}`}>{formatValue(row[column])}</td>
+                    <td key={`${column}-${rowIndex}`}>{formatValue(row[column], { empty: '' })}</td>
                   ))}
                 </tr>
               ))}

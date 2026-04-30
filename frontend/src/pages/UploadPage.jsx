@@ -33,7 +33,11 @@ function normalizeCsvValue(value) {
     return ''
   }
 
-  const text = String(value)
+  const text = String(value).trim()
+  if (['', '-', '--', 'n/a', 'na', 'null', 'none', 'unknown'].includes(text.toLowerCase())) {
+    return ''
+  }
+
   if (/[",\n\r]/.test(text)) {
     return `"${text.replaceAll('"', '""')}"`
   }
