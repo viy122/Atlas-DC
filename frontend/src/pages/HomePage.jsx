@@ -1,58 +1,60 @@
 import { Link } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
 
+const ENTRY_STEPS = [
+  { label: 'Upload', detail: 'CSV or Excel input' },
+  { label: 'Profile', detail: 'Types and missing values' },
+  { label: 'Clean', detail: 'Configurable audit rules' },
+  { label: 'Analyze', detail: 'Statistics and patterns' },
+  { label: 'Visualize', detail: 'Interactive dashboard' },
+]
+
 function HomePage() {
-  const { workflow } = useAtlas()
+  const { workflow, fileName } = useAtlas()
 
   return (
-    <div className="page-grid">
-      <section className="panel hero-panel">
-        <p className="hero-kicker">Simplified Power BI Flow</p>
-        <h2>UPLOAD TO CLEAN TO DASHBOARD</h2>
-        <p>
-          Focus tayo sa practical workflow: automatic cleaning muna, then mabilis na dashboard
-          generation using your cleaned data.
-        </p>
-        <div className="hero-actions">
-          <Link to="/dataset" className="action-button">
-            Start Data Cleaning
-          </Link>
-          <Link to="/dashboard-builder" className="action-button secondary">
-            Open Dashboard
-          </Link>
-        </div>
-      </section>
-
-      <section className="panel info-grid-panel">
-        <article className="info-card">
-          <h3>1. Upload</h3>
-          <p>Mag-load ng CSV o Excel at makita agad ang preview ng dataset.</p>
-        </article>
-        <article className="info-card">
-          <h3>2. Auto Clean</h3>
-          <p>Tanggal duplicates, fill missing values, at auto date conversion.</p>
-        </article>
-        <article className="info-card">
-          <h3>3. Dashboard</h3>
+    <div className="welcome-workbench">
+      <section className="welcome-panel">
+        <div className="welcome-copy">
+          <span className="welcome-kicker">ATLAS Data Cleaning and Analytics System</span>
+          <h1>Welcome. Start cleaning your dataset.</h1>
           <p>
-            Generate charts and summary metrics para presentable agad tulad ng simple BI view.
+            Prepare raw tabular data, review quality issues, apply explainable cleaning rules,
+            and turn the cleaned result into analysis-ready visuals.
           </p>
-        </article>
+
+          <div className="welcome-actions">
+            <Link to="/dataset" className="primary-button welcome-start-button">
+              Start Cleaning
+            </Link>
+          </div>
+        </div>
+
+        <aside className="welcome-status-panel">
+          <span>Current Workspace</span>
+          <strong>{fileName || 'No dataset loaded'}</strong>
+          <div className="welcome-status-grid">
+            <div className={workflow.uploaded ? 'welcome-status-item is-ready' : 'welcome-status-item'}>
+              Uploaded
+            </div>
+            <div className={workflow.cleaned ? 'welcome-status-item is-ready' : 'welcome-status-item'}>
+              Cleaned
+            </div>
+            <div className={workflow.dashboardReady ? 'welcome-status-item is-ready' : 'welcome-status-item'}>
+              Dashboard
+            </div>
+          </div>
+        </aside>
       </section>
 
-      <section className="panel workflow-panel">
-        <h3>Current Progress</h3>
-        <div className="workflow-pill-row">
-          <span className={workflow.uploaded ? 'workflow-pill on' : 'workflow-pill'}>
-            Uploaded
-          </span>
-          <span className={workflow.cleaned ? 'workflow-pill on' : 'workflow-pill'}>
-            Cleaned
-          </span>
-          <span className={workflow.dashboardReady ? 'workflow-pill on' : 'workflow-pill'}>
-            Dashboard Ready
-          </span>
-        </div>
+      <section className="welcome-flow-panel">
+        {ENTRY_STEPS.map((step, index) => (
+          <article key={step.label} className="welcome-flow-step">
+            <em>{String(index + 1).padStart(2, '0')}</em>
+            <strong>{step.label}</strong>
+            <span>{step.detail}</span>
+          </article>
+        ))}
       </section>
     </div>
   )

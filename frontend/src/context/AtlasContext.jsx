@@ -162,7 +162,7 @@ export function AtlasProvider({ children }) {
     }
   }
 
-  async function runAutoClean() {
+  async function runAutoClean(options = {}) {
     if (!datasetId) {
       setErrorMessage('Upload a dataset before running cleaning.')
       return
@@ -174,6 +174,10 @@ export function AtlasProvider({ children }) {
     try {
       const cleanPayload = await fetchJson(`/datasets/${datasetId}/clean`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(options),
       })
 
       setCleaningSummary(cleanPayload.cleaning_summary)

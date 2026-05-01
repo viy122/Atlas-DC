@@ -79,6 +79,28 @@ class VisualizationDatasetPayload(BaseModel):
     chart_overrides: list[VisualizationChartOverridePayload] = Field(default_factory=list)
 
 
+class CleaningConfigPayload(BaseModel):
+    normalize_placeholder_nulls: bool | None = None
+    standardize_text: bool | None = None
+    convert_datetime_columns: bool | None = None
+    convert_numeric_columns: bool | None = None
+    validate_emails: bool | None = None
+    validate_numeric_ranges: bool | None = None
+    validate_future_dates: bool | None = None
+    drop_all_null_rows: bool | None = None
+    remove_duplicates: bool | None = None
+    flag_duplicate_keys: bool | None = None
+    flag_required_missing: bool | None = None
+    drop_critical_missing: bool | None = None
+    fill_numeric_missing: bool | None = None
+    fill_datetime_missing: bool | None = None
+    fill_text_with_mode: bool | None = None
+    critical_keywords: list[str] | None = None
+    required_keywords: list[str] | None = None
+    required_missing_drop_threshold: float | None = Field(default=None, ge=0, le=1)
+    numeric_skew_threshold: float | None = Field(default=None, ge=0)
+
+
 @app.get("/")
 def home() -> dict[str, str]:
     return {"message": "ATLAS backend running"}
@@ -372,6 +394,20 @@ def _select_dataframe(dataset: dict[str, object], stage: str) -> tuple[pd.DataFr
 
 
 DEFAULT_CLEANING_CONFIG: dict[str, object] = {
+    "normalize_placeholder_nulls": True,
+    "standardize_text": True,
+    "convert_datetime_columns": True,
+    "convert_numeric_columns": True,
+    "validate_emails": True,
+    "validate_numeric_ranges": True,
+    "validate_future_dates": True,
+    "drop_all_null_rows": True,
+    "remove_duplicates": True,
+    "flag_duplicate_keys": True,
+    "flag_required_missing": True,
+    "drop_critical_missing": True,
+    "fill_numeric_missing": True,
+    "fill_datetime_missing": True,
     "placeholder_null_tokens": tuple(NULL_TEXT_TOKENS),
     "critical_keywords": ("id", "email"),
     "required_keywords": (),
@@ -441,6 +477,21 @@ def _clean_dataframe(
     date_keywords = tuple(cleaning_config["date_keywords"])  # type: ignore[arg-type]
     name_label_keywords = tuple(cleaning_config["name_label_keywords"])  # type: ignore[arg-type]
     future_date_keywords = tuple(cleaning_config["future_date_keywords"])  # type: ignore[arg-type]
+    should_normalize_nulls = bool(cleaning_config["normalize_placeholder_nulls"])
+    should_standardize_text = bool(cleaning_config["standardize_text"])
+    should_convert_datetimes = bool(cleaning_config["convert_datetime_columns"])
+    should_convert_numeric = bool(cleaning_config["convert_numeric_columns"])
+    should_validate_emails = bool(cleaning_config["validate_emails"])
+    should_validate_numeric_ranges = bool(cleaning_config["validate_numeric_ranges"])
+    should_validate_future_dates = bool(cleaning_config["validate_future_dates"])
+    should_drop_all_null_rows = bool(cleaning_config["drop_all_null_rows"])
+    should_remove_duplicates = bool(cleaning_config["remove_duplicates"])
+    should_flag_duplicate_keys = bool(cleaning_config["flag_duplicate_keys"])
+    should_flag_required_missing = bool(cleaning_config["flag_required_missing"])
+    should_drop_critical_missing = bool(cleaning_config["drop_critical_missing"])
+    should_fill_numeric_missing = bool(cleaning_config["fill_numeric_missing"])
+    should_fill_datetime_missing = bool(cleaning_config["fill_datetime_missing"])
+    should_fill_text_with_mode = bool(cleaning_config["fill_text_with_mode"])
 
     row_issues: dict[object, set[str]] = {}
     validation_errors: list[dict[str, object]] = []
@@ -479,92 +530,100 @@ def _clean_dataframe(
     # Rule 1: normalize only explicit placeholder tokens into nulls.
     nulls_normalized = 0
     standardized_text_columns: list[str] = []
-    for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
-        original_series = cleaned_df[column].astype("string")
-        normalized_series = original_series.str.strip().str.replace(r"\s+", " ", regex=True)
-        placeholder_mask = normalized_series.fillna("").str.lower().isin(placeholder_tokens)
-        normalized_series = normalized_series.mask(placeholder_mask, pd.NA)
+    if should_normalize_nulls or should_standardize_text:
+        for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
+            original_series = cleaned_df[column].astype("string")
+            normalized_series = original_series
+            if should_normalize_nulls or should_standardize_text:
+                normalized_series = normalized_series.str.strip().str.replace(r"\s+", " ", regex=True)
 
-        if _is_title_case_column(str(column)):
-            normalized_series = normalized_series.str.title()
+            if should_normalize_nulls:
+                placeholder_mask = normalized_series.fillna("").str.lower().isin(placeholder_tokens)
+                normalized_series = normalized_series.mask(placeholder_mask, pd.NA)
 
-        nulls_normalized += max(int(normalized_series.isna().sum()) - int(original_series.isna().sum()), 0)
-        if not original_series.equals(normalized_series):
-            standardized_text_columns.append(str(column))
+            if should_standardize_text and _is_title_case_column(str(column)):
+                normalized_series = normalized_series.str.title()
 
-        cleaned_df[column] = normalized_series
+            nulls_normalized += max(int(normalized_series.isna().sum()) - int(original_series.isna().sum()), 0)
+            if should_standardize_text and not original_series.equals(normalized_series):
+                standardized_text_columns.append(str(column))
+
+            cleaned_df[column] = normalized_series
 
     converted_columns: list[dict[str, str]] = []
 
     # Rule 3: convert trusted date-like columns, coercing unparseable values to null and flagging them.
-    for column in list(cleaned_df.columns):
-        column_name = str(column)
-        if not _column_matches_keywords(column_name, date_keywords):
-            continue
-        if pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
-            continue
+    if should_convert_datetimes:
+        for column in list(cleaned_df.columns):
+            column_name = str(column)
+            if not _column_matches_keywords(column_name, date_keywords):
+                continue
+            if pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
+                continue
 
-        source_non_null = int(cleaned_df[column].notna().sum())
-        if source_non_null == 0:
-            continue
+            source_non_null = int(cleaned_df[column].notna().sum())
+            if source_non_null == 0:
+                continue
 
-        converted_series = pd.to_datetime(cleaned_df[column], errors="coerce")
-        parse_ratio = float(converted_series.notna().sum()) / float(source_non_null)
-        if parse_ratio < float(cleaning_config["datetime_parse_ratio"]):
-            continue
+            converted_series = pd.to_datetime(cleaned_df[column], errors="coerce")
+            parse_ratio = float(converted_series.notna().sum()) / float(source_non_null)
+            if parse_ratio < float(cleaning_config["datetime_parse_ratio"]):
+                continue
 
-        failed_mask = cleaned_df[column].notna() & converted_series.isna()
-        failed_rows = _flag_rows(failed_mask, "invalid datetime nullified", column_name)
-        flagged_counts["conversion"] += failed_rows
-        _add_validation_error(column_name, "invalid datetime values were nullified", failed_rows)
+            failed_mask = cleaned_df[column].notna() & converted_series.isna()
+            failed_rows = _flag_rows(failed_mask, "invalid datetime nullified", column_name)
+            flagged_counts["conversion"] += failed_rows
+            _add_validation_error(column_name, "invalid datetime values were nullified", failed_rows)
 
-        cleaned_df[column] = converted_series
-        converted_columns.append({"column": column_name, "to_type": "datetime", "new_dtype": str(cleaned_df[column].dtype)})
+            cleaned_df[column] = converted_series
+            converted_columns.append({"column": column_name, "to_type": "datetime", "new_dtype": str(cleaned_df[column].dtype)})
 
     # Rule 3: convert numeric-like text only when most non-null values parse safely.
-    for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
-        column_name = str(column)
-        if _is_protected_text_column(column_name):
-            continue
+    if should_convert_numeric:
+        for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
+            column_name = str(column)
+            if _is_protected_text_column(column_name):
+                continue
 
-        non_null_values = cleaned_df[column].dropna()
-        if non_null_values.empty:
-            continue
+            non_null_values = cleaned_df[column].dropna()
+            if non_null_values.empty:
+                continue
 
-        sanitized_values = _sanitize_numeric_strings(non_null_values)
-        parsed_values = pd.to_numeric(sanitized_values, errors="coerce")
-        numeric_like_ratio = float(parsed_values.notna().sum()) / float(len(non_null_values))
-        if numeric_like_ratio < float(cleaning_config["numeric_like_ratio"]):
-            continue
+            sanitized_values = _sanitize_numeric_strings(non_null_values)
+            parsed_values = pd.to_numeric(sanitized_values, errors="coerce")
+            numeric_like_ratio = float(parsed_values.notna().sum()) / float(len(non_null_values))
+            if numeric_like_ratio < float(cleaning_config["numeric_like_ratio"]):
+                continue
 
-        sanitized_series = _sanitize_numeric_strings(cleaned_df[column])
-        converted_series = pd.to_numeric(sanitized_series, errors="coerce")
-        failed_mask = cleaned_df[column].notna() & converted_series.isna()
-        failed_rows = _flag_rows(failed_mask, "invalid numeric nullified", column_name)
-        flagged_counts["conversion"] += failed_rows
-        _add_validation_error(column_name, "invalid numeric values were nullified", failed_rows)
+            sanitized_series = _sanitize_numeric_strings(cleaned_df[column])
+            converted_series = pd.to_numeric(sanitized_series, errors="coerce")
+            failed_mask = cleaned_df[column].notna() & converted_series.isna()
+            failed_rows = _flag_rows(failed_mask, "invalid numeric nullified", column_name)
+            flagged_counts["conversion"] += failed_rows
+            _add_validation_error(column_name, "invalid numeric values were nullified", failed_rows)
 
-        cleaned_df[column] = converted_series
-        converted_columns.append({"column": column_name, "to_type": "numeric", "new_dtype": str(cleaned_df[column].dtype)})
+            cleaned_df[column] = converted_series
+            converted_columns.append({"column": column_name, "to_type": "numeric", "new_dtype": str(cleaned_df[column].dtype)})
 
     # Rule 7: validate emails by format, then nullify invalid values instead of correcting them.
-    for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), ("email",))]:
-        values = cleaned_df[column].dropna().astype("string")
-        if values.empty:
-            continue
+    if should_validate_emails:
+        for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), ("email",))]:
+            values = cleaned_df[column].dropna().astype("string")
+            if values.empty:
+                continue
 
-        valid_mask = values.str.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", na=False)
-        invalid_indexes = values.index[~valid_mask]
-        if len(invalid_indexes) > 0:
-            mask = cleaned_df.index.isin(invalid_indexes)
-            invalid_rows = _flag_rows(pd.Series(mask, index=cleaned_df.index), "invalid email nullified", str(column))
-            flagged_counts["validation"] += invalid_rows
-            _add_validation_error(str(column), "invalid email values were nullified", invalid_rows)
-            cleaned_df.loc[invalid_indexes, column] = pd.NA
+            valid_mask = values.str.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", na=False)
+            invalid_indexes = values.index[~valid_mask]
+            if len(invalid_indexes) > 0:
+                mask = cleaned_df.index.isin(invalid_indexes)
+                invalid_rows = _flag_rows(pd.Series(mask, index=cleaned_df.index), "invalid email nullified", str(column))
+                flagged_counts["validation"] += invalid_rows
+                _add_validation_error(str(column), "invalid email values were nullified", invalid_rows)
+                cleaned_df.loc[invalid_indexes, column] = pd.NA
 
     # Rule 7: enforce configured numeric ranges such as age >= 0.
     numeric_range_rules = cleaning_config["numeric_range_rules"]  # type: ignore[index]
-    if isinstance(numeric_range_rules, dict):
+    if should_validate_numeric_ranges and isinstance(numeric_range_rules, dict):
         for rule_keyword, rule in numeric_range_rules.items():
             if not isinstance(rule, dict):
                 continue
@@ -585,26 +644,30 @@ def _clean_dataframe(
 
     # Rule 7: do not allow future birthdates; flag and nullify instead.
     today = pd.Timestamp(datetime.now(timezone.utc).date())
-    for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), future_date_keywords)]:
-        if not pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
-            continue
-        invalid_mask = (cleaned_df[column] > today).fillna(False)
-        invalid_rows = _flag_rows(invalid_mask, "future date nullified", str(column))
-        if invalid_rows > 0:
-            flagged_counts["validation"] += invalid_rows
-            _add_validation_error(str(column), "future date values were nullified", invalid_rows)
-            cleaned_df.loc[invalid_mask, column] = pd.NaT
+    if should_validate_future_dates:
+        for column in [item for item in cleaned_df.columns if _column_matches_keywords(str(item), future_date_keywords)]:
+            if not pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
+                continue
+            invalid_mask = (cleaned_df[column] > today).fillna(False)
+            invalid_rows = _flag_rows(invalid_mask, "future date nullified", str(column))
+            if invalid_rows > 0:
+                flagged_counts["validation"] += invalid_rows
+                _add_validation_error(str(column), "future date values were nullified", invalid_rows)
+                cleaned_df.loc[invalid_mask, column] = pd.NaT
 
     # Rule 6: remove rows with no usable data.
-    all_null_mask = cleaned_df.isna().all(axis=1)
-    rows_dropped["all_null"] = int(all_null_mask.sum())
-    if rows_dropped["all_null"] > 0:
-        cleaned_df = cleaned_df.loc[~all_null_mask].copy()
+    if should_drop_all_null_rows:
+        all_null_mask = cleaned_df.isna().all(axis=1)
+        rows_dropped["all_null"] = int(all_null_mask.sum())
+        if rows_dropped["all_null"] > 0:
+            cleaned_df = cleaned_df.loc[~all_null_mask].copy()
 
     # Rule 4: remove fully duplicated rows only.
-    rows_before_deduplication = int(cleaned_df.shape[0])
-    cleaned_df = cleaned_df.drop_duplicates()
-    duplicates_removed = rows_before_deduplication - int(cleaned_df.shape[0])
+    duplicates_removed = 0
+    if should_remove_duplicates:
+        rows_before_deduplication = int(cleaned_df.shape[0])
+        cleaned_df = cleaned_df.drop_duplicates()
+        duplicates_removed = rows_before_deduplication - int(cleaned_df.shape[0])
 
     # Rule 4: duplicate primary keys are flagged, not deleted.
     key_columns = [
@@ -614,17 +677,18 @@ def _clean_dataframe(
     ]
     duplicate_key_columns: list[str] = []
     duplicate_key_row_indexes: set[object] = set()
-    for column in key_columns:
-        duplicate_mask = cleaned_df[column].notna() & cleaned_df[column].duplicated(keep=False)
-        duplicate_rows = _flag_rows(duplicate_mask, "duplicate primary key flagged", str(column))
-        if duplicate_rows > 0:
-            flagged_counts["duplicate_primary_key"] += duplicate_rows
-            duplicate_key_columns.append(str(column))
-            duplicate_key_row_indexes.update(duplicate_mask[duplicate_mask].index)
+    if should_flag_duplicate_keys:
+        for column in key_columns:
+            duplicate_mask = cleaned_df[column].notna() & cleaned_df[column].duplicated(keep=False)
+            duplicate_rows = _flag_rows(duplicate_mask, "duplicate primary key flagged", str(column))
+            if duplicate_rows > 0:
+                flagged_counts["duplicate_primary_key"] += duplicate_rows
+                duplicate_key_columns.append(str(column))
+                duplicate_key_row_indexes.update(duplicate_mask[duplicate_mask].index)
 
     required_columns = [column for column in cleaned_df.columns if _column_matches_keywords(str(column), required_keywords)]
     missing_required_row_indexes: set[object] = set()
-    if required_columns:
+    if should_flag_required_missing and required_columns:
         required_missing_mask = cleaned_df[required_columns].isna()
         missing_required_mask = required_missing_mask.any(axis=1)
         flagged_counts["missing_required"] = _flag_rows(missing_required_mask, "required field missing", None)
@@ -640,7 +704,7 @@ def _clean_dataframe(
 
     # Rule 2: critical rows are dropped only when trusted identifiers are missing.
     critical_columns = [column for column in cleaned_df.columns if _column_matches_keywords(str(column), critical_keywords)]
-    if critical_columns:
+    if should_drop_critical_missing and critical_columns:
         critical_missing_mask = cleaned_df[critical_columns].isna().any(axis=1)
         rows_dropped["critical_missing"] = int(critical_missing_mask.sum())
         if rows_dropped["critical_missing"] > 0:
@@ -650,54 +714,56 @@ def _clean_dataframe(
     filled_numeric_mean = 0
     filled_numeric_median = 0
     filled_numeric_columns: list[dict[str, object]] = []
-    for column in list(cleaned_df.select_dtypes(include=["number"]).columns):
-        column_name = str(column)
-        if _is_protected_text_column(column_name) or pd.api.types.is_bool_dtype(cleaned_df[column]):
-            continue
+    if should_fill_numeric_missing:
+        for column in list(cleaned_df.select_dtypes(include=["number"]).columns):
+            column_name = str(column)
+            if _is_protected_text_column(column_name) or pd.api.types.is_bool_dtype(cleaned_df[column]):
+                continue
 
-        missing_before_fill = int(cleaned_df[column].isna().sum())
-        if missing_before_fill == 0:
-            continue
+            missing_before_fill = int(cleaned_df[column].isna().sum())
+            if missing_before_fill == 0:
+                continue
 
-        non_null_series = cleaned_df[column].dropna()
-        if non_null_series.empty:
-            continue
+            non_null_series = cleaned_df[column].dropna()
+            if non_null_series.empty:
+                continue
 
-        skew_value = non_null_series.skew()
-        use_median = bool(pd.notna(skew_value) and abs(float(skew_value)) > float(cleaning_config["numeric_skew_threshold"]))
-        fill_value = non_null_series.median() if use_median else non_null_series.mean()
-        if pd.isna(fill_value):
-            continue
+            skew_value = non_null_series.skew()
+            use_median = bool(pd.notna(skew_value) and abs(float(skew_value)) > float(cleaning_config["numeric_skew_threshold"]))
+            fill_value = non_null_series.median() if use_median else non_null_series.mean()
+            if pd.isna(fill_value):
+                continue
 
-        cleaned_df[column] = cleaned_df[column].fillna(fill_value)
-        filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
-        method = "median" if use_median else "mean"
-        filled_numeric_columns.append({"column": column_name, "method": method, "filled": int(filled_count)})
-        if use_median:
-            filled_numeric_median += filled_count
-        else:
-            filled_numeric_mean += filled_count
+            cleaned_df[column] = cleaned_df[column].fillna(fill_value)
+            filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+            method = "median" if use_median else "mean"
+            filled_numeric_columns.append({"column": column_name, "method": method, "filled": int(filled_count)})
+            if use_median:
+                filled_numeric_median += filled_count
+            else:
+                filled_numeric_mean += filled_count
 
     # Rule 2: only forward-fill datetimes when the column is clearly sequential.
     filled_datetime_ffill = 0
     filled_datetime_columns: list[dict[str, object]] = []
-    for column in list(cleaned_df.select_dtypes(include=["datetime", "datetimetz"]).columns):
-        column_name = str(column)
-        if _column_matches_keywords(column_name, future_date_keywords):
-            continue
-        missing_before_fill = int(cleaned_df[column].isna().sum())
-        if missing_before_fill == 0 or not _is_sequential_datetime(cleaned_df[column]):
-            continue
+    if should_fill_datetime_missing:
+        for column in list(cleaned_df.select_dtypes(include=["datetime", "datetimetz"]).columns):
+            column_name = str(column)
+            if _column_matches_keywords(column_name, future_date_keywords):
+                continue
+            missing_before_fill = int(cleaned_df[column].isna().sum())
+            if missing_before_fill == 0 or not _is_sequential_datetime(cleaned_df[column]):
+                continue
 
-        cleaned_df[column] = cleaned_df[column].ffill()
-        filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
-        filled_datetime_ffill += filled_count
-        filled_datetime_columns.append({"column": column_name, "method": "forward_fill", "filled": int(filled_count)})
+            cleaned_df[column] = cleaned_df[column].ffill()
+            filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
+            filled_datetime_ffill += filled_count
+            filled_datetime_columns.append({"column": column_name, "method": "forward_fill", "filled": int(filled_count)})
 
     # Rule 2: text mode filling is off by default to avoid fabricating human-entered data.
     filled_text_mode = 0
     filled_text_columns: list[dict[str, object]] = []
-    if bool(cleaning_config["fill_text_with_mode"]):
+    if should_fill_text_with_mode:
         for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
             if _is_protected_text_column(str(column)):
                 continue
@@ -728,12 +794,87 @@ def _clean_dataframe(
             row_index in duplicate_key_row_indexes for row_index in cleaned_df.index
         ]
 
-    missing_after = int(cleaned_df.isna().sum().sum())
+    missing_after = int(_get_user_visible_dataframe(cleaned_df).isna().sum().sum())
     rows_dropped["total"] = int(rows_dropped["all_null"] + rows_dropped["critical_missing"] + rows_dropped["required_threshold"])
     total_filled = filled_numeric_mean + filled_numeric_median + filled_text_mode + filled_datetime_ffill
 
+    def _cleaning_step(
+        name: str,
+        enabled: bool,
+        impact_count: int,
+        handling: str,
+        rationale: str,
+    ) -> dict[str, object]:
+        return {
+            "name": name,
+            "enabled": enabled,
+            "impact_count": int(impact_count),
+            "handling": handling if enabled else "Skipped",
+            "rationale": rationale,
+        }
+
+    cleaning_steps = [
+        _cleaning_step(
+            "Normalize placeholder nulls",
+            should_normalize_nulls,
+            nulls_normalized,
+            "Converted explicit placeholders to null",
+            "Blank, NA, null, unknown, and dash values should be measured as missing data.",
+        ),
+        _cleaning_step(
+            "Standardize text formats",
+            should_standardize_text,
+            len(standardized_text_columns),
+            "Trimmed spacing and title-cased name or label columns",
+            "Consistent labels improve grouping, filtering, and dashboard readability.",
+        ),
+        _cleaning_step(
+            "Convert data types",
+            should_convert_datetimes or should_convert_numeric,
+            len(converted_columns),
+            "Converted trusted date-like and numeric-like columns",
+            "Typed columns unlock valid statistics, comparisons, and chart aggregation.",
+        ),
+        _cleaning_step(
+            "Remove duplicate rows",
+            should_remove_duplicates,
+            duplicates_removed,
+            "Removed only fully duplicated records",
+            "Exact duplicates can double-count metrics without adding new information.",
+        ),
+        _cleaning_step(
+            "Handle missing values",
+            should_fill_numeric_missing or should_fill_datetime_missing or should_fill_text_with_mode,
+            total_filled,
+            "Filled numeric/date gaps using deterministic methods",
+            "Numeric gaps use mean or median while human-entered text stays null unless mode fill is enabled.",
+        ),
+        _cleaning_step(
+            "Filter invalid records",
+            should_drop_all_null_rows or should_drop_critical_missing,
+            rows_dropped["total"],
+            "Dropped all-null rows and rows missing critical identifiers",
+            "Rows without usable data or trusted identifiers are not reliable for analysis.",
+        ),
+        _cleaning_step(
+            "Validate invalid values",
+            should_validate_emails or should_validate_numeric_ranges or should_validate_future_dates,
+            flagged_counts["validation"] + flagged_counts["conversion"],
+            "Flagged or nullified invalid email, date, and numeric values",
+            "Invalid values are safer to mark than silently correct with a guess.",
+        ),
+        _cleaning_step(
+            "Flag review items",
+            should_flag_duplicate_keys or should_flag_required_missing,
+            len(flagged_row_indexes),
+            "Kept suspicious rows with audit flags",
+            "Possible duplicate keys or required-field gaps need review but may still contain usable data.",
+        ),
+    ]
+
     audit_log = {
         "nulls_normalized": int(nulls_normalized),
+        "cleaning_steps": cleaning_steps,
         "rows_dropped": rows_dropped,
         "duplicates_removed": int(duplicates_removed),
         "filled_numeric_values": {
@@ -746,7 +887,7 @@ def _clean_dataframe(
             "mode": int(filled_text_mode),
             "total": int(filled_text_mode),
             "columns": filled_text_columns,
-            "policy": "mode fill enabled" if bool(cleaning_config["fill_text_with_mode"]) else "preserve nulls by default",
+            "policy": "mode fill enabled" if should_fill_text_with_mode else "preserve nulls by default",
         },
         "filled_datetime_values": {
             "forward_fill": int(filled_datetime_ffill),
@@ -768,7 +909,23 @@ def _clean_dataframe(
             "duplicate_primary_key": "_atlas_duplicate_primary_key_flag",
         },
         "config": {
-            "fill_text_with_mode": bool(cleaning_config["fill_text_with_mode"]),
+            "normalize_placeholder_nulls": should_normalize_nulls,
+            "standardize_text": should_standardize_text,
+            "convert_datetime_columns": should_convert_datetimes,
+            "convert_numeric_columns": should_convert_numeric,
+            "validate_emails": should_validate_emails,
+            "validate_numeric_ranges": should_validate_numeric_ranges,
+            "validate_future_dates": should_validate_future_dates,
+            "drop_all_null_rows": should_drop_all_null_rows,
+            "remove_duplicates": should_remove_duplicates,
+            "flag_duplicate_keys": should_flag_duplicate_keys,
+            "flag_required_missing": should_flag_required_missing,
+            "drop_critical_missing": should_drop_critical_missing,
+            "fill_numeric_missing": should_fill_numeric_missing,
+            "fill_datetime_missing": should_fill_datetime_missing,
+            "fill_text_with_mode": should_fill_text_with_mode,
+            "critical_keywords": list(critical_keywords),
+            "required_keywords": list(required_keywords),
             "required_missing_drop_threshold": cleaning_config["required_missing_drop_threshold"],
             "numeric_skew_threshold": cleaning_config["numeric_skew_threshold"],
         },
@@ -796,9 +953,11 @@ def _clean_dataframe(
         "filled_text_values": audit_log["filled_text_values"],
         "flagged_rows": audit_log["flagged_rows"],
         "validation_errors": validation_errors,
+        "cleaning_steps": cleaning_steps,
         "audit_log": audit_log,
         "duplicate_primary_key_columns": duplicate_key_columns,
-        "data_integrity_policy": "Unknown human-entered values are preserved as null and flagged instead of guessed.",
+        "config_applied": audit_log["config"],
+        "data_integrity_policy": "ATLAS uses configurable cleaning rules and avoids guessing unknown human-entered values unless mode fill is enabled.",
     }
     return cleaned_df, summary
 
@@ -1215,26 +1374,26 @@ def _build_apex_options(
         "chart": {
             "id": chart_id,
             "background": "transparent",
-            "foreColor": "#dbe7e1",
+            "foreColor": "#47564d",
             "toolbar": {"show": False},
             "zoom": {"enabled": False},
             "animations": {"enabled": True},
         },
-        "theme": {"mode": "dark"},
+        "theme": {"mode": "light"},
         "colors": APEX_CHART_COLORS,
         "title": {
             "text": title,
-            "style": {"fontSize": "15px", "fontWeight": 800, "color": "#f4fbf8"},
+            "style": {"fontSize": "15px", "fontWeight": 800, "color": "#1d2521"},
         },
         "subtitle": {
             "text": subtitle,
-            "style": {"fontSize": "12px", "color": "#9fb1a8"},
+            "style": {"fontSize": "12px", "color": "#718178"},
         },
         "dataLabels": {"enabled": False},
-        "grid": {"borderColor": "rgba(219, 231, 225, 0.12)", "strokeDashArray": 4},
-        "legend": {"labels": {"colors": "#dbe7e1"}},
+        "grid": {"borderColor": "#dfe7e1", "strokeDashArray": 4},
+        "legend": {"labels": {"colors": "#47564d"}},
         "stroke": {"curve": "smooth", "width": 3},
-        "tooltip": {"theme": "dark"},
+        "tooltip": {"theme": "light"},
         "noData": {"text": "No compatible data available"},
     }
 
@@ -1243,18 +1402,18 @@ def _build_apex_options(
             "type": xaxis_type,
             "categories": categories if xaxis_type == "category" else None,
             "labels": {
-                "style": {"colors": "#9fb1a8"},
+                "style": {"colors": "#718178"},
                 "rotate": -35,
                 "trim": True,
             },
         }
-        options["yaxis"] = {"labels": {"style": {"colors": "#9fb1a8"}}}
+        options["yaxis"] = {"labels": {"style": {"colors": "#718178"}}}
 
     if labels is not None:
         options["labels"] = labels
         options["legend"] = {
             "position": "bottom",
-            "labels": {"colors": "#dbe7e1"},
+            "labels": {"colors": "#47564d"},
         }
 
     return options
@@ -1391,7 +1550,7 @@ def _build_time_apex_chart(
     options = _build_apex_options(chart_id, title, description, categories=[], xaxis_type="datetime")
     options["xaxis"] = {
         "type": "datetime",
-        "labels": {"style": {"colors": "#9fb1a8"}},
+        "labels": {"style": {"colors": "#718178"}},
     }
 
     return {
@@ -1425,8 +1584,8 @@ def _build_sequence_line_chart(
     options = _build_apex_options(chart_id, title, description, categories=[])
     options["xaxis"] = {
         "type": "numeric",
-        "title": {"text": "Row index", "style": {"color": "#9fb1a8"}},
-        "labels": {"style": {"colors": "#9fb1a8"}},
+        "title": {"text": "Row index", "style": {"color": "#718178"}},
+        "labels": {"style": {"colors": "#718178"}},
     }
 
     return {
@@ -1465,8 +1624,8 @@ def _build_scatter_apex_chart(
     options = _build_apex_options(chart_id, title, description, categories=[])
     options["xaxis"] = {
         "type": "numeric",
-        "title": {"text": x_axis, "style": {"color": "#9fb1a8"}},
-        "labels": {"style": {"colors": "#9fb1a8"}},
+        "title": {"text": x_axis, "style": {"color": "#718178"}},
+        "labels": {"style": {"colors": "#718178"}},
     }
     options["markers"] = {"size": 5, "strokeWidth": 0}
 
@@ -2507,6 +2666,26 @@ def _build_updated_dataframe(
     return updated_df
 
 
+def _build_cleaning_config_from_payload(payload: CleaningConfigPayload | None) -> dict[str, object] | None:
+    if payload is None:
+        return None
+
+    config = payload.model_dump(exclude_none=True)
+    for keyword_field in ("critical_keywords", "required_keywords"):
+        if keyword_field not in config:
+            continue
+        config[keyword_field] = tuple(
+            str(keyword).strip()
+            for keyword in config[keyword_field]
+            if str(keyword).strip()
+        )
+
+    if config.get("required_missing_drop_threshold") == 0:
+        config["required_missing_drop_threshold"] = None
+
+    return config
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)) -> dict[str, object]:
     extension = _validate_upload_file(file)
@@ -2659,13 +2838,13 @@ def update_raw_dataset(dataset_id: str, payload: DatasetUpdatePayload) -> dict[s
 
 
 @app.post("/datasets/{dataset_id}/clean")
-def clean_dataset(dataset_id: str) -> dict[str, object]:
+def clean_dataset(dataset_id: str, payload: CleaningConfigPayload | None = None) -> dict[str, object]:
     dataset = _get_dataset(dataset_id)
     raw_df = dataset["raw"]
     if not isinstance(raw_df, pd.DataFrame):
         raise HTTPException(status_code=500, detail="Dataset state is invalid")
 
-    cleaned_df, summary = _clean_dataframe(raw_df)
+    cleaned_df, summary = _clean_dataframe(raw_df, _build_cleaning_config_from_payload(payload))
     dataset["cleaned"] = cleaned_df
     dataset["cleaning_summary"] = summary
 

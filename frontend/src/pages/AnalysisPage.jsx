@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
+import { buildQualityReport } from '../utils/dataQuality'
 import { formatPercent, formatValue, totalMissing } from '../utils/formatters'
 
 function getStrongestCorrelation(correlationMatrix = []) {
@@ -35,6 +36,40 @@ function getTrendDelta(data = []) {
   return ((last - first) / Math.abs(first)) * 100
 }
 
+function getCorrelationPairs(correlationMatrix = []) {
+  const seenPairs = new Set()
+  const pairs = []
+
+  for (const row of correlationMatrix) {
+    for (const [target, score] of Object.entries(row.correlations ?? {})) {
+      const numericScore = Number(score)
+      if (!Number.isFinite(numericScore)) {
+        continue
+      }
+
+      const pairKey = [row.column, target].sort().join('::')
+      if (seenPairs.has(pairKey)) {
+        continue
+      }
+
+      seenPairs.add(pairKey)
+      pairs.push({ source: row.column, target, score: numericScore })
+    }
+  }
+
+  return pairs.sort((left, right) => Math.abs(right.score) - Math.abs(left.score))
+}
+
+function AnalysisMetric({ label, value, hint }) {
+  return (
+    <article className="analysis-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{hint}</small>
+    </article>
+  )
+}
+
 function InsightCard({ title, body, action, tone = 'default', meta }) {
   return (
     <article className={`insight-card insight-card--${tone}`}>
@@ -52,6 +87,7 @@ function AnalysisPage() {
   const {
     datasetId,
     fileName,
+    uploadedDataset,
     rawProfile,
     cleanedProfile,
     cleaningSummary,
@@ -76,9 +112,29 @@ function AnalysisPage() {
   const numericSummary = analysis?.numeric_summary ?? []
   const topFrequencies = analysis?.top_frequencies ?? []
   const strongestCorrelation = getStrongestCorrelation(analysis?.correlation_matrix ?? [])
+  const correlationPairs = getCorrelationPairs(analysis?.correlation_matrix ?? [])
   const trendDelta = getTrendDelta(charts?.trend_line?.data ?? [])
-  const missingTotal = totalMissing((cleanedProfile ?? rawProfile)?.column_profiles ?? [])
+  const activeProfile = cleanedProfile ?? rawProfile
+  const activeColumnProfiles = activeProfile?.column_profiles ?? []
+  const missingTotal = totalMissing(activeColumnProfiles)
+  const qualityReport = buildQualityReport(activeProfile, uploadedDataset.rows)
   const bestCategory = topFrequencies[0]?.values?.[0]
+  const chartCount = charts?.chart_configs?.length ?? charts?.charts?.length ?? 0
+  const cleaningSteps = cleaningSummary?.cleaning_steps ?? []
+  const recommendations = [
+    missingTotal > 0
+      ? `Review ${formatValue(missingTotal)} remaining missing cells before final reporting.`
+      : 'Dataset completeness is strong after the current cleaning stage.',
+    cleaningSummary?.duplicates_removed > 0
+      ? `${formatValue(cleaningSummary.duplicates_removed)} duplicate row(s) were removed, reducing possible double counting.`
+      : 'No exact duplicate removal impact is currently recorded.',
+    strongestCorrelation
+      ? `Use ${strongestCorrelation.source} and ${strongestCorrelation.target} together when explaining numeric behavior.`
+      : 'Add or clean more numeric fields to unlock stronger relationship analysis.',
+    chartCount > 0
+      ? `${formatValue(chartCount)} dashboard chart configuration(s) are ready for visual validation.`
+      : 'Generate visualizations after analysis to validate the patterns on charts.',
+  ]
 
   const executiveSummary = strongestCorrelation
     ? `ATLAS found the strongest relationship between ${strongestCorrelation.source} and ${strongestCorrelation.target}, with a correlation score of ${strongestCorrelation.score.toFixed(2)}.`
@@ -206,6 +262,176 @@ function AnalysisPage() {
           }
           action="Open Dashboard Builder"
         />
+      </section>
+
+      <section className="analysis-metric-grid">
+        <AnalysisMetric
+          label="Quality Score"
+          value={formatPercent(qualityReport.score, 1)}
+          hint={`${qualityReport.missingCells} missing cells`}
+        />
+        <AnalysisMetric
+          label="Numeric Fields"
+          value={numericSummary.length}
+          hint="Columns with statistics"
+        />
+        <AnalysisMetric
+          label="Category Fields"
+          value={topFrequencies.length}
+          hint="Columns with frequent values"
+        />
+        <AnalysisMetric
+          label="Relationships"
+          value={correlationPairs.length}
+          hint="Numeric pair checks"
+        />
+      </section>
+
+      <section className="analysis-detail-grid">
+        <article className="surface-card analysis-panel analysis-panel--wide">
+          <div className="card-header">
+            <div>
+              <h2>Numeric Summary</h2>
+              <p>Mean, median, range, and spread for measurable columns.</p>
+            </div>
+          </div>
+
+          {numericSummary.length > 0 ? (
+            <div className="analysis-table-wrap">
+              <table className="analysis-table">
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Mean</th>
+                    <th>Median</th>
+                    <th>Min</th>
+                    <th>Max</th>
+                    <th>Std Dev</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {numericSummary.map((stat) => (
+                    <tr key={`numeric-${stat.column}`}>
+                      <td>
+                        <strong>{stat.column}</strong>
+                      </td>
+                      <td>{formatValue(stat.mean)}</td>
+                      <td>{formatValue(stat.median)}</td>
+                      <td>{formatValue(stat.min)}</td>
+                      <td>{formatValue(stat.max)}</td>
+                      <td>{formatValue(stat.std)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="empty-state-inline">No numeric columns are available for summary statistics.</p>
+          )}
+        </article>
+
+        <article className="surface-card analysis-panel">
+          <div className="card-header">
+            <div>
+              <h2>Decision Notes</h2>
+              <p>Recommended talking points for defense and reporting.</p>
+            </div>
+          </div>
+
+          <div className="analysis-recommendation-list">
+            {recommendations.map((recommendation) => (
+              <div key={recommendation}>{recommendation}</div>
+            ))}
+          </div>
+        </article>
+
+        <article className="surface-card analysis-panel">
+          <div className="card-header">
+            <div>
+              <h2>Most Frequent Values</h2>
+              <p>Dominant categories found in the active dataset.</p>
+            </div>
+          </div>
+
+          {topFrequencies.length > 0 ? (
+            <div className="frequency-column-list">
+              {topFrequencies.map((column) => (
+                <section key={`freq-${column.column}`} className="frequency-column">
+                  <h3>{column.column}</h3>
+                  {(column.values ?? []).slice(0, 5).map((item) => (
+                    <div key={`${column.column}-${item.label}`} className="frequency-row">
+                      <span>{item.label}</span>
+                      <strong>{formatValue(item.count)}</strong>
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state-inline">No categorical frequency output is available yet.</p>
+          )}
+        </article>
+
+        <article className="surface-card analysis-panel">
+          <div className="card-header">
+            <div>
+              <h2>Correlation Check</h2>
+              <p>Top numeric relationships ranked by absolute score.</p>
+            </div>
+          </div>
+
+          {correlationPairs.length > 0 ? (
+            <div className="correlation-list">
+              {correlationPairs.slice(0, 6).map((pair) => (
+                <div key={`${pair.source}-${pair.target}`} className="correlation-row">
+                  <span>
+                    {pair.source} / {pair.target}
+                  </span>
+                  <strong>{pair.score.toFixed(2)}</strong>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state-inline">Correlation analysis needs at least two numeric columns.</p>
+          )}
+        </article>
+
+        <article className="surface-card analysis-panel">
+          <div className="card-header">
+            <div>
+              <h2>Cleaning Impact</h2>
+              <p>How preprocessing affected this analysis stage.</p>
+            </div>
+          </div>
+
+          {cleaningSummary ? (
+            <div className="analysis-impact-list">
+              <div>
+                <span>Rows</span>
+                <strong>
+                  {formatValue(cleaningSummary.rows_before)} to {formatValue(cleaningSummary.rows_after)}
+                </strong>
+              </div>
+              <div>
+                <span>Missing Cells</span>
+                <strong>
+                  {formatValue(cleaningSummary.missing_values_before)} to{' '}
+                  {formatValue(cleaningSummary.missing_values_after)}
+                </strong>
+              </div>
+              <div>
+                <span>Duplicates Removed</span>
+                <strong>{formatValue(cleaningSummary.duplicates_removed ?? 0)}</strong>
+              </div>
+              <div>
+                <span>Rules Applied</span>
+                <strong>{cleaningSteps.filter((step) => step.enabled).length}</strong>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state-inline">Run the cleaning step to show preprocessing impact here.</p>
+          )}
+        </article>
       </section>
     </div>
   )

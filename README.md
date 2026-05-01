@@ -1,80 +1,120 @@
-# Atlas-DC
+# ATLAS Data Cleaning and Analytics System
 
-![React](https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=white)
+ATLAS is a web-based data cleaning and analytics system for BAT403 - Foundations of Enterprise Data Management. It supports the required workflow:
 
-## 📑 Table of Contents
+`Upload -> Profile -> Clean -> Analyze -> Visualize`
 
-- [Description](#description)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Quick Start](#quick-start)
-- [Key Dependencies](#key-dependencies)
-- [Run Commands](#run-commands)
-- [Screenshots](#screenshots)
-- [Project Structure](#project-structure)
-- [Development Setup](#development-setup)
-- [Contributing](#contributing)
+The system accepts CSV and Excel files, profiles data quality, applies configurable cleaning rules, compares the original and cleaned datasets, generates insights, and builds an interactive dashboard.
 
-## 📝 Description
+## Project Objective
 
-Atlas-DC is a high-performance web application built with React, designed to provide an intuitive and comprehensive interface for data visualization and management. Leveraging the power of modern web technologies, Atlas-DC offers a seamless user experience for exploring complex information landscapes, making it an essential tool for efficient data navigation and discovery.
+Raw business datasets often contain missing values, inconsistent formats, duplicated records, invalid values, and mixed data types. ATLAS addresses this problem by giving users one guided workflow for preparing tabular data and turning it into useful summaries, interpretations, and dashboard visuals.
 
-## ✨ Features
+## Core Features
 
-- 🕸️ Web
+- Upload CSV, XLSX, or XLS files
+- Display uploaded data in an editable table
+- Profile rows, columns, data types, missing values, uniqueness, and basic statistics
+- Clean data using configurable rules
+- Compare original versus cleaned records with changed cells highlighted
+- Generate numeric summaries, frequent values, correlations, and simple interpretations
+- Create interactive dashboards with bar, line, donut/pie, scatter, and histogram charts
+- Filter dashboard data by category, number range, or date range
+- Export cleaned CSV files and finalized dashboards as PNG or PDF
+- Provide a sample dataset for testing and screenshots
 
-## 🛠️ Tech Stack
+## Cleaning Methods
 
-- ⚛️ React
+ATLAS uses configurable cleaning rules so the user can explain why each transformation was applied:
 
-## ⚡ Quick Start
+| Method | Logic |
+| --- | --- |
+| Placeholder normalization | Converts blanks, `NA`, `null`, `unknown`, and dash values into real missing values. |
+| Text standardization | Trims extra spacing and title-cases name or label fields. |
+| Data type conversion | Converts trusted date-like and numeric-like columns into analysis-ready types. |
+| Missing numeric handling | Fills numeric gaps with mean or median depending on skew and outliers. |
+| Missing text handling | Preserves text nulls by default; optional mode fill is available. |
+| Duplicate handling | Removes exact duplicate rows and flags duplicate identifier values. |
+| Invalid data filtering | Drops rows with missing critical identifiers and flags invalid values. |
+| Validation | Checks email format, numeric ranges, and future birthdate-style values. |
+
+The Cleaning page also shows a decision log with the impact count, handling method, and rationale for each rule.
+
+## System Pages
+
+| Page | Purpose |
+| --- | --- |
+| Upload | Import CSV/Excel data, preview/edit rows, save edits, and export edited CSV. |
+| Profile | Review dataset summary, detected data types, missing values, uniqueness, and numeric statistics. |
+| Clean | Select cleaning rules, run the pipeline, review audit results, and compare original versus cleaned data. |
+| Analyze | View generated interpretations, frequent values, correlations, quality warnings, and trend signals. |
+| Visualize | Build an interactive dashboard with filters, custom charts, drag ordering, finalization, and export. |
+| Docs | Access documentation notes, screenshot checklist, and the sample dataset. |
+
+## Tech Stack
+
+- Frontend: React, Vite, React Router, ApexCharts
+- Backend: FastAPI, pandas, NumPy
+- File support: CSV, XLSX, XLS
+- Export support: CSV, PNG, PDF
+
+## Setup
+
+### Backend
 
 ```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
 
-# Clone the repository
-git clone https://github.com/viy122/Atlas-DC.git
+### Frontend
 
-# Install dependencies
+```bash
+cd frontend
 npm install
-
-# Start development server
 npm run dev
 ```
 
-## 📦 Key Dependencies
+Open the Vite URL, usually `http://localhost:5173`.
 
-```
-react: ^19.2.5
-react-dom: ^19.2.5
-react-router-dom: ^7.14.2
-```
+## Sample Dataset
 
-## 🚀 Run Commands
+Use `frontend/public/sample_sales_dataset.csv` for defense and screenshots. It includes:
 
-- **dev**: `npm run dev`
-- **build**: `npm run build`
-- **lint**: `npm run lint`
-- **preview**: `npm run preview`
+- Missing sales, quantity, and customer name values
+- Duplicate order records
+- Numeric values stored as text
+- Placeholder values such as `unknown` and `-`
+- Inconsistent customer name casing
+- Date values for trend charts
 
+## Defense Demo Flow
 
-## 🛠️ Development Setup
+1. Open ATLAS and upload `sample_sales_dataset.csv`.
+2. Show the uploaded table and explain that raw data can be edited before processing.
+3. Go to Profile and point out rows, columns, types, missing values, uniqueness, and statistics.
+4. Go to Clean, select the cleaning rules, then run the cleaning pipeline.
+5. Explain the audit metrics and the decision log: what changed, how it was handled, and why.
+6. Open Original vs Cleaned Dataset and show highlighted changed cells.
+7. Go to Analyze and explain the generated summaries and interpretations.
+8. Go to Visualize, use filters, customize a chart, and finalize/export the dashboard.
+9. Go to Docs and show the sample dataset and screenshot checklist.
 
-### Node.js/JavaScript Setup
-1. Install Node.js (v18+ recommended)
-2. Install dependencies: `npm install` or `yarn install`
-3. Start development server: (Check scripts in `package.json`, e.g., `npm run dev`)
+## Screenshot Checklist
 
-## 👥 Contributing
+Include these in the final documentation:
 
-Contributions are welcome! Here's how you can help:
+- Upload page with raw dataset loaded
+- Profile page showing types and missing values
+- Cleaning page showing rule controls and audit results
+- Original vs cleaned comparison table
+- Analysis page with generated insights
+- Visualization page with dashboard charts and filters
+- Exported or finalized dashboard
 
-1. **Fork** the repository
-2. **Clone** your fork: `git clone https://github.com/viy122/Atlas-DC.git`
-3. **Create** a new branch: `git checkout -b feature/your-feature`
-4. **Commit** your changes: `git commit -am 'Add some feature'`
-5. **Push** to your branch: `git push origin feature/your-feature`
-6. **Open** a pull request
+## Notes and Limitations
 
-Please ensure your code follows the project's style guidelines and includes tests where applicable.
-
-
+- Uploaded datasets are stored in backend memory for the current server session.
+- This project is designed for class demonstration datasets, not large production data warehouses.
+- Cleaning rules are intentionally explainable and conservative so the defense can justify each method.

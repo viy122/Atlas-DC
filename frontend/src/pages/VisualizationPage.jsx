@@ -90,6 +90,7 @@ function KpiCard({
   textOverride = {},
   isFinalized,
   onEditText,
+  onRemove,
 }) {
   const displayLabel = textOverride.title || label
   const displayHint = textOverride.subtitle || hint
@@ -101,13 +102,22 @@ function KpiCard({
       <small>{displayHint}</small>
 
       {!isFinalized ? (
-        <button
-          type="button"
-          className="visual-card-edit-button"
-          onClick={() => onEditText(textKey, { label, value, hint })}
-        >
-          Edit
-        </button>
+        <div className="visual-kpi-actions">
+          <button
+            type="button"
+            className="visual-card-edit-button"
+            onClick={() => onEditText(textKey, { label, value, hint })}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            className="visual-card-remove-button"
+            onClick={() => onRemove(textKey)}
+          >
+            Remove
+          </button>
+        </div>
       ) : null}
     </article>
   )
@@ -794,6 +804,7 @@ function VisualizationPage() {
   const [manualCharts, setManualCharts] = useState([])
   const [customChartsById, setCustomChartsById] = useState({})
   const [hiddenChartIds, setHiddenChartIds] = useState([])
+  const [hiddenKpiKeys, setHiddenKpiKeys] = useState([])
   const [chartOrder, setChartOrder] = useState([])
   const [draggingChartId, setDraggingChartId] = useState('')
   const [isFinalized, setIsFinalized] = useState(false)
@@ -841,9 +852,14 @@ function VisualizationPage() {
   const kpiCards = insightKpis.length > 0 ? insightKpis : fallbackKpis
   const hasDatasetPayload = sourceColumns.length > 0 || sourceRows.length > 0
   const hiddenChartIdSet = useMemo(() => new Set(hiddenChartIds), [hiddenChartIds])
+  const hiddenKpiKeySet = useMemo(() => new Set(hiddenKpiKeys), [hiddenKpiKeys])
   const dashboardCharts = useMemo(
     () => [...renderedCharts, ...manualCharts],
     [manualCharts, renderedCharts],
+  )
+  const visibleKpiCards = useMemo(
+    () => kpiCards.filter((kpi, index) => !hiddenKpiKeySet.has(getKpiTextKey(kpi, index))),
+    [hiddenKpiKeySet, kpiCards],
   )
   const visibleCharts = useMemo(() => {
     const availableCharts = dashboardCharts.filter((chart) => !hiddenChartIdSet.has(chart.id))
@@ -855,7 +871,7 @@ function VisualizationPage() {
 
     return [...orderedCharts, ...unorderedCharts]
   }, [chartOrder, dashboardCharts, hiddenChartIdSet])
-  const presentationKpis = isFinalized && finalizedDashboard?.kpis ? finalizedDashboard.kpis : kpiCards
+  const presentationKpis = isFinalized && finalizedDashboard?.kpis ? finalizedDashboard.kpis : visibleKpiCards
   const presentationCharts = isFinalized && finalizedDashboard?.charts ? finalizedDashboard.charts : visibleCharts
   const presentationKpiText = isFinalized && finalizedDashboard?.kpiTextByKey
     ? finalizedDashboard.kpiTextByKey
@@ -958,6 +974,7 @@ function VisualizationPage() {
           setCustomChartsById({})
           setManualCharts([])
           setHiddenChartIds([])
+          setHiddenKpiKeys([])
           setChartOrder((payload.chart_configs ?? []).map((chart) => chart.id))
           setFilterMetadata(payload.filters ?? [])
           setFilterState({})
@@ -1079,6 +1096,7 @@ function VisualizationPage() {
       setCustomChartsById({})
       setManualCharts([])
       setHiddenChartIds([])
+      setHiddenKpiKeys([])
       setChartOrder((payload.chart_configs ?? []).map((chart) => chart.id))
       setFilterMetadata(payload.filters ?? [])
       setFilterState({})
@@ -1162,6 +1180,11 @@ function VisualizationPage() {
     setOpenChartMenuId((current) => (current === chartId ? '' : current))
   }
 
+  function removeKpi(textKey) {
+    setHiddenKpiKeys((previous) => (previous.includes(textKey) ? previous : [...previous, textKey]))
+    setActiveEditor((current) => (current?.type === 'kpi' && current.textKey === textKey ? null : current))
+  }
+
   function moveChart(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) {
       return
@@ -1206,11 +1229,12 @@ function VisualizationPage() {
       datasetId,
       fileName,
       savedAt: new Date().toISOString(),
-      kpis: kpiCards,
+      kpis: visibleKpiCards,
       charts: visibleCharts,
       chartOrder: visibleCharts.map((chart) => chart.id),
       settingsById,
       hiddenChartIds,
+      hiddenKpiKeys,
       manualCharts,
       customChartsById,
       filterState,
@@ -1241,6 +1265,7 @@ function VisualizationPage() {
     setManualCharts(savedDashboard.manualCharts ?? [])
     setCustomChartsById(savedDashboard.customChartsById ?? {})
     setHiddenChartIds(savedDashboard.hiddenChartIds ?? [])
+    setHiddenKpiKeys(savedDashboard.hiddenKpiKeys ?? [])
     setChartOrder(savedDashboard.chartOrder ?? savedDashboard.charts?.map((chart) => chart.id) ?? [])
     setSettingsById(savedDashboard.settingsById ?? {})
     setFilterState(savedDashboard.filterState ?? {})
@@ -1301,7 +1326,7 @@ function VisualizationPage() {
     }
 
     return html2canvas(dashboardCaptureRef.current, {
-      backgroundColor: '#101614',
+      backgroundColor: '#f7f8f6',
       scale: 2,
       useCORS: true,
     })
@@ -1508,6 +1533,7 @@ function VisualizationPage() {
               onEditText={(textKey, selectedKpi) =>
                 setActiveEditor({ type: 'kpi', textKey, kpi: selectedKpi })
               }
+              onRemove={removeKpi}
             />
           ))}
         </section>

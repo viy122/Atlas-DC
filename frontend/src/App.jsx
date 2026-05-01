@@ -3,6 +3,7 @@ import TopNavigation from './components/TopNavigation'
 import { AtlasProvider } from './context/AtlasContext'
 import AnalysisPage from './pages/AnalysisPage'
 import CleaningPage from './pages/CleaningPage'
+import HomePage from './pages/HomePage'
 import ProfilingPage from './pages/ProfilingPage'
 import ReportsPage from './pages/ReportsPage'
 import UploadPage from './pages/UploadPage'
@@ -18,7 +19,7 @@ function App() {
 
           <main className="app-main">
             <Routes>
-              <Route path="/" element={<Navigate to="/dataset" replace />} />
+              <Route path="/" element={<HomePage />} />
               <Route path="/dataset" element={<UploadPage />} />
               <Route path="/profiling" element={<ProfilingPage />} />
               <Route path="/cleaning" element={<CleaningPage />} />
