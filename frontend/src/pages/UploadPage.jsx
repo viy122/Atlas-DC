@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { IconButtonContent } from '../components/AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 import { formatBytes, formatDataType, formatDateTime, totalMissing } from '../utils/formatters'
 
-function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data' }) {
+function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data', iconOnly = false }) {
   return (
-    <label className={`primary-button import-button${busy ? ' is-busy' : ''}`}>
-      <span>{busy ? 'Importing...' : label}</span>
+    <label
+      className={`primary-button import-button${busy ? ' is-busy' : ''}${iconOnly ? ' icon-only-button' : ''}`}
+      title={busy ? 'Importing' : label}
+      aria-label={busy ? 'Importing' : label}
+    >
+      {iconOnly ? (
+        <IconButtonContent icon="upload" label={busy ? 'Importing' : label} />
+      ) : (
+        <span>{busy ? 'Importing...' : label}</span>
+      )}
       <input
         type="file"
         accept=".csv,.xlsx,.xls"
@@ -56,10 +65,12 @@ function UploadPage() {
     errorMessage,
     uploadDataset,
     saveDatasetEdits,
+    renameDatasetFile,
     resetWorkspace,
   } = useAtlas()
 
   const [editableRows, setEditableRows] = useState([])
+  const [draftFileName, setDraftFileName] = useState('')
   const [dirtyCells, setDirtyCells] = useState(() => new Set())
   const [saveMessage, setSaveMessage] = useState('')
   const [undoStack, setUndoStack] = useState([])
@@ -104,6 +115,12 @@ function UploadPage() {
     setUndoStack([])
     setRedoStack([])
   }, [uploadedDataset.rows])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setDraftFileName(fileName || '')
+  }, [fileName])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   function markDirty(token = '__table') {
@@ -226,6 +243,20 @@ function UploadPage() {
     }
   }
 
+  async function handleRenameFile(event) {
+    event.preventDefault()
+    if (!hasDataset || draftFileName.trim() === fileName) {
+      return
+    }
+
+    try {
+      await renameDatasetFile(draftFileName)
+      setSaveMessage('File name updated.')
+    } catch {
+      setSaveMessage('')
+    }
+  }
+
   return (
     <div className="upload-workbench">
       <aside className="query-sidebar">
@@ -240,48 +271,45 @@ function UploadPage() {
       </aside>
 
       <section className="query-main">
-        <div className="query-notice">
-          <span className="query-notice__icon">i</span>
-          <span>{hasDataset ? 'Preview is editable. Save changes before profiling or cleaning.' : 'Import a CSV or Excel file to begin.'}</span>
-          <button type="button" className="editor-toolbar__button" onClick={resetEdits} disabled={!hasUnsavedChanges}>
-            Reset Edits
-          </button>
-        </div>
-
         <div className="editor-toolbar upload-editor-toolbar">
           <div className="editor-toolbar__group">
-            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} />
-            <button type="button" className="editor-toolbar__button" onClick={resetWorkspace} disabled={!hasDataset}>
-              Close
+            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} iconOnly />
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={resetWorkspace} disabled={!hasDataset} title="Close dataset" aria-label="Close dataset">
+              <IconButtonContent icon="close" label="Close dataset" />
             </button>
-            <button type="button" className="editor-toolbar__button" onClick={undoEdit} disabled={!canUndo}>
-              Undo
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={resetEdits} disabled={!hasUnsavedChanges} title="Reset edits" aria-label="Reset edits">
+              <IconButtonContent icon="reset" label="Reset edits" />
             </button>
-            <button type="button" className="editor-toolbar__button" onClick={redoEdit} disabled={!canRedo}>
-              Redo
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={undoEdit} disabled={!canUndo} title="Undo" aria-label="Undo">
+              <IconButtonContent icon="undo" label="Undo" />
+            </button>
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={redoEdit} disabled={!canRedo} title="Redo" aria-label="Redo">
+              <IconButtonContent icon="redo" label="Redo" />
             </button>
             <button
               type="button"
-              className="editor-toolbar__button"
+              className="editor-toolbar__button icon-only-button"
               onClick={handleSaveEdits}
               disabled={!hasDataset || !hasUnsavedChanges || busyAction === 'saving'}
+              title={busyAction === 'saving' ? 'Saving' : 'Save changes'}
+              aria-label={busyAction === 'saving' ? 'Saving' : 'Save changes'}
             >
-              {busyAction === 'saving' ? 'Saving...' : 'Save Changes'}
+              <IconButtonContent icon="save" label={busyAction === 'saving' ? 'Saving' : 'Save changes'} />
             </button>
-            <button type="button" className="editor-toolbar__button" onClick={addRow} disabled={!hasDataset}>
-              Add Row
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={addRow} disabled={!hasDataset} title="Add row" aria-label="Add row">
+              <IconButtonContent icon="plus" label="Add row" />
             </button>
-            <button type="button" className="editor-toolbar__button" onClick={exportCsv} disabled={!hasDataset}>
-              Export CSV
+            <button type="button" className="editor-toolbar__button icon-only-button" onClick={exportCsv} disabled={!hasDataset} title="Export CSV" aria-label="Export CSV">
+              <IconButtonContent icon="download" label="Export CSV" />
             </button>
           </div>
 
           <div className="editor-toolbar__group">
-            <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'}>
-              Profile
+            <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button icon-only-button' : 'editor-toolbar__button icon-only-button disabled-link'} title="Profile" aria-label="Profile">
+              <IconButtonContent icon="profile" label="Profile" />
             </Link>
-            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'}>
-              Clean
+            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button icon-only-button' : 'editor-toolbar__button icon-only-button disabled-link'} title="Clean" aria-label="Clean">
+              <IconButtonContent icon="clean" label="Clean" />
             </Link>
           </div>
         </div>
@@ -335,8 +363,8 @@ function UploadPage() {
                         )
                       })}
                       <td className="row-action-col">
-                        <button type="button" className="table-nav-button" onClick={() => removeRow(rowIndex)}>
-                          Delete
+                        <button type="button" className="table-nav-button icon-only-button" onClick={() => removeRow(rowIndex)} title="Delete row" aria-label="Delete row">
+                          <IconButtonContent icon="trash" label="Delete row" />
                         </button>
                       </td>
                     </tr>
@@ -374,7 +402,23 @@ function UploadPage() {
         <div className="query-setting-group">
           <span>Properties</span>
           <label htmlFor="query-name">Name</label>
-          <input id="query-name" value={fileName || ''} readOnly />
+          <form className="rename-file-form" onSubmit={handleRenameFile}>
+            <input
+              id="query-name"
+              value={draftFileName}
+              onChange={(event) => setDraftFileName(event.target.value)}
+              disabled={!hasDataset || busyAction === 'renaming'}
+            />
+            <button
+              type="submit"
+              className="editor-toolbar__button icon-only-button"
+              disabled={!hasDataset || !draftFileName.trim() || draftFileName.trim() === fileName || busyAction === 'renaming'}
+              title="Rename file"
+              aria-label="Rename file"
+            >
+              <IconButtonContent icon="edit" label="Rename file" />
+            </button>
+          </form>
         </div>
 
         <div className="query-setting-group">

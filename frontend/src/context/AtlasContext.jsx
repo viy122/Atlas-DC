@@ -251,6 +251,39 @@ export function AtlasProvider({ children }) {
     }
   }
 
+  async function renameDatasetFile(filename) {
+    if (!datasetId) {
+      setErrorMessage('Upload a dataset before renaming it.')
+      return
+    }
+
+    const nextFilename = String(filename || '').trim()
+    if (!nextFilename) {
+      setErrorMessage('File name cannot be empty.')
+      return
+    }
+
+    setBusyAction('renaming')
+    setErrorMessage('')
+
+    try {
+      const payload = await fetchJson(`/datasets/${datasetId}/filename`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ filename: nextFilename }),
+      })
+
+      setFileName(payload.filename ?? nextFilename)
+    } catch (error) {
+      setErrorMessage(error.message)
+      throw error
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   async function generateDashboard() {
     if (!datasetId) {
       setErrorMessage('Upload a dataset before generating dashboard outputs.')
@@ -492,6 +525,7 @@ export function AtlasProvider({ children }) {
     errorMessage,
     uploadDataset,
     saveDatasetEdits,
+    renameDatasetFile,
     runAutoClean,
     generateDashboard,
     visualizeDatasetRows,

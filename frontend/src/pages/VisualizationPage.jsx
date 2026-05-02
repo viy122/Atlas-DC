@@ -3,17 +3,18 @@ import { jsPDF } from 'jspdf'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'react-apexcharts'
 import { Link } from 'react-router-dom'
+import { IconButtonContent } from '../components/AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 import { formatValue } from '../utils/formatters'
 
 const CHART_TYPE_OPTIONS = [
-  { value: 'bar', label: 'Bar' },
-  { value: 'line', label: 'Line' },
-  { value: 'area', label: 'Area' },
-  { value: 'pie', label: 'Pie' },
-  { value: 'donut', label: 'Donut' },
-  { value: 'scatter', label: 'Scatter' },
-  { value: 'histogram', label: 'Histogram' },
+  { value: 'bar', label: 'Bar', icon: 'bar' },
+  { value: 'line', label: 'Line', icon: 'line' },
+  { value: 'area', label: 'Area', icon: 'area' },
+  { value: 'pie', label: 'Pie', icon: 'pie' },
+  { value: 'donut', label: 'Donut', icon: 'donut' },
+  { value: 'scatter', label: 'Scatter', icon: 'scatter' },
+  { value: 'histogram', label: 'Histogram', icon: 'histogram' },
 ]
 
 const AGGREGATION_OPTIONS = [
@@ -26,7 +27,39 @@ const AGGREGATION_OPTIONS = [
 
 const APEX_TYPES = new Set(['line', 'area', 'bar', 'pie', 'donut', 'scatter'])
 const SAVED_DASHBOARD_PREFIX = 'atlas:finalizedDashboard:'
-const DATA_TABLE_PAGE_SIZE = 25
+const CANVAS_LAYOUT_PREFIX = 'atlas:blankCanvas:'
+const DEFAULT_WORKSPACE_WIDGETS = {}
+const BLANK_WORKSPACE_WIDGETS = {}
+const CANVAS_SIZE = { width: 1440, height: 900 }
+const CANVAS_PALETTE = [
+  '#0f766e',
+  '#2563eb',
+  '#f59e0b',
+  '#dc2626',
+  '#7c3aed',
+  '#0891b2',
+  '#16a34a',
+  '#db2777',
+]
+
+const CANVAS_VISUAL_TYPES = [
+  { value: 'bar', label: 'Bar chart', icon: 'bar', kind: 'chart' },
+  { value: 'line', label: 'Line chart', icon: 'line', kind: 'chart' },
+  { value: 'pie', label: 'Pie chart', icon: 'pie', kind: 'chart' },
+  { value: 'donut', label: 'Donut chart', icon: 'donut', kind: 'chart' },
+  { value: 'area', label: 'Area chart', icon: 'area', kind: 'chart' },
+  { value: 'scatter', label: 'Scatter chart', icon: 'scatter', kind: 'chart' },
+  { value: 'kpi', label: 'KPI card', icon: 'kpi', kind: 'kpi' },
+  { value: 'table', label: 'Table', icon: 'table', kind: 'table' },
+  { value: 'text', label: 'Text box', icon: 'text', kind: 'text' },
+]
+
+const FONT_FAMILY_OPTIONS = [
+  { value: 'Inter, system-ui, sans-serif', label: 'Inter' },
+  { value: 'Arial, sans-serif', label: 'Arial' },
+  { value: 'Georgia, serif', label: 'Georgia' },
+  { value: '"Courier New", monospace', label: 'Courier' },
+]
 
 function normalizeChartType(chart) {
   return chart?.chart_type === 'histogram' ? 'histogram' : chart?.chart_type || chart?.type || 'bar'
@@ -49,8 +82,451 @@ function buildDefaultSettings(chart, columns, numericColumns) {
   }
 }
 
+function clampValue(value, min, max) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function getColumnType(column, columns = []) {
+  const profile = columns.find((item) => item.name === column)
+  return profile?.type || profile?.dtype || ''
+}
+
+function getDisplayColumnType(column, columns = []) {
+  const rawType = String(getColumnType(column, columns)).toLowerCase()
+
+  if (rawType.includes('date') || rawType.includes('time')) {
+    return 'date'
+  }
+
+  if (rawType.includes('numeric') || rawType.includes('int') || rawType.includes('float') || rawType.includes('number')) {
+    return 'numeric'
+  }
+
+  return 'categorical'
+}
+
+function getAggregationLabel(aggregation) {
+  const option = AGGREGATION_OPTIONS.find((item) => item.value === aggregation)
+  return option?.label || 'Count'
+}
+
+function getMeasureField(visual) {
+  return visual.fields?.y_axis || visual.fields?.values?.[0] || ''
+}
+
+function getDimensionField(visual) {
+  return visual.fields?.x_axis || visual.fields?.label || ''
+}
+
+function getCanvasVisualTitle(visual) {
+  if (visual.settings?.titleTouched && visual.settings?.title) {
+    return visual.settings.title
+  }
+
+  if (visual.kind === 'text') {
+    return visual.settings?.title || 'Text Box'
+  }
+
+  if (visual.kind === 'table') {
+    const columns = visual.fields?.values ?? []
+    return columns.length ? `Table of ${columns.slice(0, 3).join(', ')}` : 'Data Table'
+  }
+
+  const aggregation = visual.settings?.aggregation || 'count'
+  const aggregationLabel = getAggregationLabel(aggregation)
+  const measure = getMeasureField(visual)
+  const dimension = getDimensionField(visual)
+
+  if (measure && dimension) {
+    return `${aggregationLabel} of ${measure} by ${dimension}`
+  }
+
+  if (measure) {
+    return `${aggregationLabel} of ${measure}`
+  }
+
+  if (dimension) {
+    return `${aggregationLabel} of records by ${dimension}`
+  }
+
+  return visual.settings?.title || getVisualDefaults(visual.type).title
+}
+
+function getFieldWellWarning(fieldName, acceptedTypes, columnProfiles) {
+  if (!fieldName || acceptedTypes.includes('any')) {
+    return ''
+  }
+
+  const fieldType = getDisplayColumnType(fieldName, columnProfiles)
+  if (acceptedTypes.includes(fieldType)) {
+    return ''
+  }
+
+  const recommended = acceptedTypes.join(' or ')
+  return `Recommended: ${recommended}. ${fieldType} is allowed.`
+}
+
+function getFieldWellsForVisual(visual) {
+  const chartType = visual.settings?.chart_type || visual.type
+
+  if (visual.kind === 'kpi') {
+    return [
+      { field: 'values', label: 'Value / Measure', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'label', label: 'Label / Optional Dimension', acceptedTypes: ['categorical', 'date'], multiple: false },
+      { field: 'filters', label: 'Filter', acceptedTypes: ['any'], multiple: true },
+    ]
+  }
+
+  if (visual.kind === 'table') {
+    return [
+      { field: 'values', label: 'Columns', acceptedTypes: ['any'], multiple: true },
+      { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+    ]
+  }
+
+  if (visual.kind !== 'chart') {
+    return []
+  }
+
+  if (chartType === 'pie' || chartType === 'donut') {
+    return [
+      { field: 'x_axis', label: 'Category / Legend', acceptedTypes: ['categorical', 'date'], multiple: false },
+      { field: 'y_axis', label: 'Values / Measure', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'tooltip', label: 'Tooltip', acceptedTypes: ['any'], multiple: true },
+      { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+    ]
+  }
+
+  if (chartType === 'line' || chartType === 'area') {
+    return [
+      { field: 'x_axis', label: 'X-axis / Date or Dimension', acceptedTypes: ['date', 'categorical'], multiple: false },
+      { field: 'y_axis', label: 'Y-axis / Measure', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'legend', label: 'Legend / Group', acceptedTypes: ['categorical', 'date'], multiple: false },
+      { field: 'tooltip', label: 'Tooltip', acceptedTypes: ['any'], multiple: true },
+      { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+    ]
+  }
+
+  if (chartType === 'scatter') {
+    return [
+      { field: 'x_axis', label: 'X-axis / Measure', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'y_axis', label: 'Y-axis / Measure', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'tooltip', label: 'Tooltip', acceptedTypes: ['any'], multiple: true },
+      { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+    ]
+  }
+
+  return [
+    { field: 'x_axis', label: 'X-axis / Dimension', acceptedTypes: ['categorical', 'date'], multiple: false },
+    { field: 'y_axis', label: 'Y-axis / Measure', acceptedTypes: ['numeric'], multiple: false },
+    { field: 'legend', label: 'Legend / Group', acceptedTypes: ['categorical', 'date'], multiple: false },
+    { field: 'tooltip', label: 'Tooltip', acceptedTypes: ['any'], multiple: true },
+    { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+  ]
+}
+
+function getVisualDefaults(type) {
+  if (type === 'kpi') {
+    return { width: 260, height: 150, title: 'KPI Card' }
+  }
+
+  if (type === 'table') {
+    return { width: 520, height: 280, title: 'Data Table' }
+  }
+
+  if (type === 'text') {
+    return { width: 300, height: 160, title: 'Text Box' }
+  }
+
+  return { width: 420, height: 300, title: `${type.charAt(0).toUpperCase()}${type.slice(1)} Chart` }
+}
+
+function createCanvasVisual(type, index = 0) {
+  const visualType = CANVAS_VISUAL_TYPES.find((item) => item.value === type) ?? CANVAS_VISUAL_TYPES[0]
+  const defaults = getVisualDefaults(type)
+  const isChart = visualType.kind === 'chart'
+  const isKpi = visualType.kind === 'kpi'
+
+  return {
+    id: `canvas-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    kind: visualType.kind,
+    type,
+    x: 32 + (index % 5) * 34,
+    y: 34 + (index % 5) * 30,
+    width: defaults.width,
+    height: defaults.height,
+    fields: {
+      x_axis: '',
+      y_axis: '',
+      legend: '',
+      label: '',
+      tooltip: [],
+      filters: [],
+      filter: '',
+      values: [],
+    },
+    settings: {
+      chart_type: isChart ? type : 'bar',
+      aggregation: isKpi ? 'count' : 'count',
+      title: defaults.title,
+      titleTouched: false,
+      subtitle: '',
+      caption: '',
+      fontFamily: FONT_FAMILY_OPTIONS[0].value,
+      fontSize: isKpi ? 26 : 13,
+      color: CANVAS_PALETTE[index % CANVAS_PALETTE.length],
+      secondaryColor: CANVAS_PALETTE[(index + 1) % CANVAS_PALETTE.length],
+      backgroundColor: '#ffffff',
+      borderRadius: 8,
+      showLegend: true,
+      showLabels: false,
+    },
+    content: 'Add your note here.',
+  }
+}
+
+function formatCanvasLabel(value) {
+  if (value === null || value === undefined || value === '') {
+    return 'Missing'
+  }
+
+  return String(value)
+}
+
+function aggregateCanvasValues(values, aggregation) {
+  if (aggregation === 'count') {
+    return values.length
+  }
+
+  const numericValues = values.map((value) => Number(value)).filter(Number.isFinite)
+  if (!numericValues.length) {
+    return null
+  }
+
+  if (aggregation === 'sum') {
+    return numericValues.reduce((sum, value) => sum + value, 0)
+  }
+
+  if (aggregation === 'average') {
+    return numericValues.reduce((sum, value) => sum + value, 0) / numericValues.length
+  }
+
+  if (aggregation === 'min') {
+    return Math.min(...numericValues)
+  }
+
+  if (aggregation === 'max') {
+    return Math.max(...numericValues)
+  }
+
+  return numericValues.length
+}
+
+function buildCanvasChart(visual, rows) {
+  const chartType = visual.settings?.chart_type || visual.type || 'bar'
+  const apexType = chartType === 'histogram' ? 'bar' : chartType
+  const xAxis = visual.fields?.x_axis || ''
+  const yAxis = visual.fields?.y_axis || ''
+  const legendField = visual.fields?.legend || ''
+  const aggregation = visual.settings?.aggregation || 'count'
+  const title = getCanvasVisualTitle(visual)
+  const subtitle = visual.settings?.subtitle || ''
+  const colors = [visual.settings?.color || CANVAS_PALETTE[0], visual.settings?.secondaryColor || CANVAS_PALETTE[1], ...CANVAS_PALETTE]
+  const baseOptions = {
+    chart: {
+      id: visual.id,
+      background: 'transparent',
+      foreColor: '#47564d',
+      toolbar: { show: false },
+      zoom: { enabled: false },
+      animations: { enabled: true },
+    },
+    colors,
+    dataLabels: { enabled: Boolean(visual.settings?.showLabels) },
+    grid: { borderColor: '#dfe7e1', strokeDashArray: 4 },
+    legend: {
+      show: Boolean(visual.settings?.showLegend),
+      position: 'bottom',
+      labels: { colors: '#47564d' },
+    },
+    stroke: { curve: 'smooth', width: 3 },
+    tooltip: { theme: 'light' },
+    title: { text: '' },
+    subtitle: { text: '' },
+    noData: { text: 'Drag fields here to build this visual.' },
+  }
+
+  if (!xAxis || !rows.length || (aggregation !== 'count' && !yAxis)) {
+    return {
+      id: visual.id,
+      title,
+      description: 'Drag fields here to build this visual.',
+      type: APEX_TYPES.has(apexType) ? apexType : 'bar',
+      chart_type: chartType,
+      x_axis: xAxis,
+      y_axis: yAxis,
+      series: [],
+      options: baseOptions,
+      empty: true,
+    }
+  }
+
+  if (chartType === 'scatter') {
+    if (!yAxis) {
+      return {
+        id: visual.id,
+        title,
+        description: 'Drag fields here to build this visual.',
+        type: 'scatter',
+        chart_type: 'scatter',
+        x_axis: xAxis,
+        y_axis: yAxis,
+        series: [],
+        options: baseOptions,
+        empty: true,
+      }
+    }
+
+    const data = rows
+      .map((row) => ({ x: Number(row[xAxis]), y: Number(row[yAxis]) }))
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      .slice(0, 350)
+
+    return {
+      id: visual.id,
+      title,
+      description: subtitle,
+      type: 'scatter',
+      chart_type: 'scatter',
+      x_axis: xAxis,
+      y_axis: yAxis,
+      series: [{ name: yAxis || 'Value', data }],
+      options: {
+        ...baseOptions,
+        markers: { size: 5, strokeWidth: 0 },
+        xaxis: {
+          type: 'numeric',
+          title: { text: xAxis, style: { color: '#718178' } },
+          labels: { style: { colors: '#718178' } },
+        },
+        yaxis: { labels: { style: { colors: '#718178' } } },
+      },
+      empty: data.length === 0,
+    }
+  }
+
+  const grouped = new Map()
+  rows.forEach((row) => {
+    const label = formatCanvasLabel(row[xAxis])
+    const groupLabel = legendField ? formatCanvasLabel(row[legendField]) : '__single__'
+    const legendBuckets = grouped.get(label) ?? new Map()
+    const currentValues = legendBuckets.get(groupLabel) ?? []
+    currentValues.push(yAxis ? row[yAxis] : 1)
+    legendBuckets.set(groupLabel, currentValues)
+    grouped.set(label, legendBuckets)
+  })
+
+  const pairs = [...grouped.entries()]
+    .map(([label, legendBuckets]) => {
+      const total = [...legendBuckets.values()]
+        .map((values) => aggregateCanvasValues(values, aggregation))
+        .filter((value) => value !== null && value !== undefined)
+        .reduce((sum, value) => sum + Number(value), 0)
+
+      return [label, total, legendBuckets]
+    })
+    .filter(([, value]) => value !== null && value !== undefined)
+    .sort((left, right) => {
+      if (['line', 'area'].includes(chartType)) {
+        return String(left[0]).localeCompare(String(right[0]), undefined, { numeric: true })
+      }
+
+      return Number(right[1]) - Number(left[1])
+    })
+    .slice(0, 18)
+
+  const labels = pairs.map(([label]) => label)
+  const values = pairs.map(([, value]) => Number(value.toFixed ? value.toFixed(2) : value))
+  const legendValues = legendField
+    ? [
+        ...new Set(
+          pairs.flatMap(([, , legendBuckets]) => [...legendBuckets.keys()]),
+        ),
+      ].slice(0, 8)
+    : []
+
+  if (chartType === 'pie' || chartType === 'donut') {
+    return {
+      id: visual.id,
+      title,
+      description: subtitle,
+      type: chartType,
+      chart_type: chartType,
+      x_axis: xAxis,
+      y_axis: yAxis,
+      series: values,
+      options: {
+        ...baseOptions,
+        labels,
+        plotOptions: chartType === 'donut' ? { pie: { donut: { size: '62%' } } } : undefined,
+      },
+      empty: values.length === 0,
+    }
+  }
+
+  return {
+    id: visual.id,
+    title,
+    description: subtitle,
+    type: chartType === 'area' ? 'area' : chartType === 'line' ? 'line' : 'bar',
+    chart_type: chartType,
+    x_axis: xAxis,
+    y_axis: yAxis,
+    series: legendValues.length
+      ? legendValues.map((legendValue) => ({
+          name: legendValue,
+          data: pairs.map(([, , legendBuckets]) => {
+            const valuesForLegend = legendBuckets.get(legendValue) ?? []
+            const aggregatedValue = aggregateCanvasValues(valuesForLegend, aggregation)
+            return aggregatedValue === null || aggregatedValue === undefined
+              ? 0
+              : Number(aggregatedValue.toFixed ? aggregatedValue.toFixed(2) : aggregatedValue)
+          }),
+        }))
+      : [{ name: aggregation === 'count' ? 'Records' : yAxis || 'Value', data: values }],
+    options: {
+      ...baseOptions,
+      xaxis: {
+        type: 'category',
+        categories: labels,
+        labels: { style: { colors: '#718178' }, rotate: -35, trim: true },
+      },
+      yaxis: { labels: { style: { colors: '#718178' } } },
+    },
+    empty: values.length === 0,
+  }
+}
+
+function computeCanvasKpi(visual, rows) {
+  const field = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
+  const aggregation = visual.settings?.aggregation || 'count'
+  const values = field ? rows.map((row) => row[field]) : rows
+  const rawValue = aggregateCanvasValues(values, aggregation)
+  const labelField = visual.fields?.label || ''
+
+  return {
+    label: getCanvasVisualTitle(visual),
+    value: formatValue(rawValue ?? rows.length),
+    hint: visual.settings?.subtitle || (labelField ? `Filtered by ${labelField}` : field || 'Filtered rows'),
+  }
+}
+
 function getKpiTextKey(kpi, index) {
   return `${kpi.type || 'kpi'}:${kpi.label || index}`
+}
+
+function getKpiInstanceKey(kpi, index) {
+  return kpi.id || getKpiTextKey(kpi, index)
 }
 
 function getSavedDashboardKey(datasetId) {
@@ -72,6 +548,35 @@ function getSavedDashboard(datasetId) {
   } catch {
     return null
   }
+}
+
+function getCanvasLayoutKey(datasetId) {
+  return `${CANVAS_LAYOUT_PREFIX}${datasetId || 'workspace'}`
+}
+
+function getSavedCanvasLayout(datasetId) {
+  if (typeof window === 'undefined' || !datasetId) {
+    return null
+  }
+
+  const rawValue = window.localStorage.getItem(getCanvasLayoutKey(datasetId))
+  if (!rawValue) {
+    return null
+  }
+
+  try {
+    return JSON.parse(rawValue)
+  } catch {
+    return null
+  }
+}
+
+function saveCanvasLayout(datasetId, layout) {
+  if (typeof window === 'undefined' || !datasetId) {
+    return
+  }
+
+  window.localStorage.setItem(getCanvasLayoutKey(datasetId), JSON.stringify(layout))
 }
 
 function saveDashboardConfig(datasetId, config) {
@@ -123,6 +628,291 @@ function KpiCard({
   )
 }
 
+function NoteCard({ note, isFinalized, onEdit, onRemove }) {
+  return (
+    <article className="visual-note-card">
+      <div>
+        <span>Note</span>
+        <h3>{note.title || 'Untitled Note'}</h3>
+        {note.body ? <p>{note.body}</p> : null}
+      </div>
+
+      {!isFinalized ? (
+        <div className="visual-kpi-actions">
+          <button type="button" className="visual-card-edit-button" onClick={onEdit}>
+            Edit
+          </button>
+          <button type="button" className="visual-card-remove-button" onClick={onRemove}>
+            Remove
+          </button>
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function WorkspaceControlPanel({
+  mode,
+  widgetCount,
+  isLoading,
+  showWidgetBar = true,
+  onBlankWorkspace,
+  onSuggestedWorkspace,
+  onAddChart,
+  onAddKpi,
+  onAddNote,
+}) {
+  return (
+    <section className="visual-workspace-panel">
+      <header className="visual-section-title">
+        <div>
+          <h2>Workspace Sheet</h2>
+          <p>{mode === 'blank' ? `Blank sheet / ${widgetCount} widgets` : `Suggested sheet / ${widgetCount} widgets`}</p>
+        </div>
+        <div className="visual-workspace-actions">
+          <button type="button" className="visual-secondary-button" onClick={onBlankWorkspace}>
+            <IconButtonContent icon="plus" label="New blank sheet" showLabel />
+          </button>
+          <button
+            type="button"
+            className="visual-secondary-button"
+            onClick={onSuggestedWorkspace}
+            disabled={isLoading}
+          >
+            <IconButtonContent icon="load" label="Use suggested" showLabel />
+          </button>
+        </div>
+      </header>
+
+      {showWidgetBar ? (
+        <div className="visual-widget-bar" aria-label="Add dashboard widgets">
+          <button type="button" className="visual-widget-button" onClick={onAddChart}>
+            <IconButtonContent icon="visualize" label="Chart" showLabel />
+          </button>
+          <button type="button" className="visual-widget-button" onClick={onAddKpi}>
+            <IconButtonContent icon="analyze" label="KPI" showLabel />
+          </button>
+          <button type="button" className="visual-widget-button" onClick={onAddNote}>
+            <IconButtonContent icon="edit" label="Note" showLabel />
+          </button>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function ChartTypeIcon({ type }) {
+  return <span className={`visual-chart-type-icon visual-chart-type-icon--${type}`} aria-hidden="true" />
+}
+
+function ChartTypeSelector({ value, onChange }) {
+  return (
+    <div className="visual-chart-type-selector" role="radiogroup" aria-label="Chart type">
+      {CHART_TYPE_OPTIONS.map((option) => (
+        <button
+          key={`chart-type-${option.value}`}
+          type="button"
+          className={
+            value === option.value
+              ? 'visual-chart-type-button visual-chart-type-button--active'
+              : 'visual-chart-type-button'
+          }
+          onClick={() => onChange(option.value)}
+          aria-pressed={value === option.value}
+        >
+          <ChartTypeIcon type={option.icon} />
+          <span>{option.label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function getChartFilterColumn(chart) {
+  return chart?.x_axis || chart?.dimension || ''
+}
+
+function normalizeCategoryFilterValue(value) {
+  if (value === null || value === undefined) {
+    return 'Missing'
+  }
+
+  return String(value)
+}
+
+function normalizeDateFilterValue(value) {
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  const rawValue = String(value)
+  const isoDateMatch = rawValue.match(/^\d{4}-\d{2}-\d{2}/)
+  if (isoDateMatch) {
+    return isoDateMatch[0]
+  }
+
+  const parsedDate = new Date(rawValue)
+  return Number.isNaN(parsedDate.getTime()) ? rawValue : parsedDate.toISOString().slice(0, 10)
+}
+
+function getFilterDisplayValue(value) {
+  const displayValue = normalizeCategoryFilterValue(value).trim()
+  return displayValue || 'Blank'
+}
+
+function parseNumericFilterRange(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? { min: value, max: value } : null
+  }
+
+  const label = String(value ?? '').trim()
+  const rangeMatch = label.match(
+    /^[[(]?\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*(?:,|to|\s+-\s+)\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*[\])]?$/i,
+  )
+
+  if (rangeMatch) {
+    const minValue = Number(rangeMatch[1])
+    const maxValue = Number(rangeMatch[2])
+    if (Number.isFinite(minValue) && Number.isFinite(maxValue)) {
+      return { min: Math.min(minValue, maxValue), max: Math.max(minValue, maxValue) }
+    }
+  }
+
+  const numericValue = Number(label)
+  return Number.isFinite(numericValue) ? { min: numericValue, max: numericValue } : null
+}
+
+function formatActiveFilterValue(filter, state) {
+  if (filter.type === 'datetime') {
+    if (state.start && state.end && state.start === state.end) {
+      return state.start
+    }
+
+    return `${state.start || filter.start || 'Start'} to ${state.end || filter.end || 'End'}`
+  }
+
+  if (filter.type === 'numeric') {
+    const minValue = state.min ?? filter.min
+    const maxValue = state.max ?? filter.max
+
+    if (minValue !== undefined && maxValue !== undefined && Number(minValue) === Number(maxValue)) {
+      return formatValue(minValue)
+    }
+
+    return `${formatValue(minValue)} to ${formatValue(maxValue)}`
+  }
+
+  return (state.values ?? []).map(getFilterDisplayValue).join(', ')
+}
+
+function buildChartFilterState(filter, rawValue) {
+  if (!filter) {
+    return null
+  }
+
+  if (filter.type === 'datetime') {
+    const dateValue = normalizeDateFilterValue(rawValue)
+    return dateValue ? { start: dateValue, end: dateValue } : null
+  }
+
+  if (filter.type === 'numeric') {
+    return parseNumericFilterRange(rawValue)
+  }
+
+  return { values: [normalizeCategoryFilterValue(rawValue)] }
+}
+
+function chartPointMatchesFilter(filter, state, rawValue) {
+  if (!filter || !state) {
+    return false
+  }
+
+  if (filter.type === 'datetime') {
+    const dateValue = normalizeDateFilterValue(rawValue)
+    return Boolean(dateValue && state.start === dateValue && state.end === dateValue)
+  }
+
+  if (filter.type === 'numeric') {
+    const numericRange = parseNumericFilterRange(rawValue)
+    return (
+      Boolean(numericRange) &&
+      Number(state.min) === numericRange.min &&
+      Number(state.max) === numericRange.max
+    )
+  }
+
+  const selectedValues = state.values ?? []
+  const selectedValue = normalizeCategoryFilterValue(rawValue)
+  return selectedValues.length === 1 && selectedValues[0] === selectedValue
+}
+
+function filterStatesMatch(filter, leftState, rightState) {
+  if (!filter || !leftState || !rightState) {
+    return false
+  }
+
+  if (filter.type === 'datetime') {
+    return leftState.start === rightState.start && leftState.end === rightState.end
+  }
+
+  if (filter.type === 'numeric') {
+    return Number(leftState.min) === Number(rightState.min) && Number(leftState.max) === Number(rightState.max)
+  }
+
+  const leftValues = leftState.values ?? []
+  const rightValues = rightState.values ?? []
+  return leftValues.length === 1 && rightValues.length === 1 && leftValues[0] === rightValues[0]
+}
+
+function resolveChartPointValue(chart, sourceOptions, series, config) {
+  const dataPointIndex = config?.dataPointIndex
+  if (dataPointIndex === undefined || dataPointIndex < 0) {
+    return null
+  }
+
+  if (chart?.type === 'pie' || chart?.type === 'donut') {
+    return sourceOptions.labels?.[dataPointIndex] ?? null
+  }
+
+  const seriesIndex = config?.seriesIndex >= 0 ? config.seriesIndex : 0
+  const point = series?.[seriesIndex]?.data?.[dataPointIndex]
+
+  if (point && typeof point === 'object' && !Array.isArray(point)) {
+    if (Object.hasOwn(point, 'x')) {
+      return point.x
+    }
+
+    if (Object.hasOwn(point, 'label')) {
+      return point.label
+    }
+  }
+
+  if (Array.isArray(point)) {
+    return point[0]
+  }
+
+  return sourceOptions.xaxis?.categories?.[dataPointIndex] ?? point ?? null
+}
+
+function getChartPointValues(chart, sourceOptions, series) {
+  if (chart?.type === 'pie' || chart?.type === 'donut') {
+    return sourceOptions.labels ?? []
+  }
+
+  if (Array.isArray(sourceOptions.xaxis?.categories) && sourceOptions.xaxis.categories.length) {
+    return sourceOptions.xaxis.categories
+  }
+
+  const data = series?.[0]?.data ?? []
+  return data.map((point) => {
+    if (point && typeof point === 'object' && !Array.isArray(point)) {
+      return Object.hasOwn(point, 'x') ? point.x : point.label
+    }
+
+    return Array.isArray(point) ? point[0] : point
+  })
+}
+
 function ChartCard({
   chart,
   isFinalized,
@@ -137,27 +927,117 @@ function ChartCard({
   onDrop,
   onDragEnd,
   textOverride = {},
+  filterMetadataByColumn,
+  filterState,
+  onChartValueSelect,
 }) {
   const apexType = APEX_TYPES.has(chart?.type) ? chart.type : 'bar'
   const series = Array.isArray(chart?.series) ? chart.series : []
   const sourceOptions = chart?.options ?? {}
+  const filterColumn = getChartFilterColumn(chart)
+  const chartFilter = filterColumn ? filterMetadataByColumn?.get(filterColumn) : null
+  const chartFilterState = filterColumn ? filterState?.[filterColumn] : null
+  const isFilterableChart = Boolean(
+    !chart?.empty &&
+      chartFilter &&
+      onChartValueSelect,
+  )
+  const pointValues = getChartPointValues(chart, sourceOptions, series)
+  const selectedPointIndex =
+    chartFilter && chartFilterState
+      ? pointValues.findIndex((value) => chartPointMatchesFilter(chartFilter, chartFilterState, value))
+      : -1
+  const sourceChartOptions = sourceOptions.chart ?? {}
+  const sourceEvents = sourceChartOptions.events ?? {}
   const options = {
     ...sourceOptions,
     chart: {
-      ...(sourceOptions.chart ?? {}),
+      ...sourceChartOptions,
       toolbar: { show: false },
+      events: {
+        ...sourceEvents,
+        dataPointSelection: (event, chartContext, config) => {
+          if (typeof sourceEvents.dataPointSelection === 'function') {
+            sourceEvents.dataPointSelection(event, chartContext, config)
+          }
+
+          if (!isFilterableChart) {
+            return
+          }
+
+          const selectedValue = resolveChartPointValue(chart, sourceOptions, series, config)
+          if (selectedValue === null || selectedValue === undefined) {
+            return
+          }
+
+          onChartValueSelect(filterColumn, selectedValue)
+        },
+      },
     },
     title: { text: '' },
     subtitle: { text: '' },
+    tooltip: {
+      ...(sourceOptions.tooltip ?? {}),
+      shared: false,
+      intersect: true,
+    },
   }
   const displayTitle = textOverride.title || chart?.title || 'Auto Chart'
   const displayDescription = textOverride.subtitle || ''
   const displayCaption = textOverride.caption || ''
 
+  if (isFilterableChart && ['line', 'area', 'scatter'].includes(apexType)) {
+    const sourceMarkerSize = Number(sourceOptions.markers?.size ?? 4)
+    options.markers = {
+      ...(sourceOptions.markers ?? {}),
+      size: sourceMarkerSize > 0 ? sourceMarkerSize : 4,
+    }
+  }
+
+  if (isFilterableChart && selectedPointIndex >= 0) {
+    const selectedColor = '#0f766e'
+    const mutedColor = '#d7e0db'
+
+    if (apexType === 'pie' || apexType === 'donut') {
+      options.colors = pointValues.map((_, index) => (index === selectedPointIndex ? selectedColor : mutedColor))
+    } else if (apexType === 'bar') {
+      options.colors = pointValues.map((_, index) => (index === selectedPointIndex ? selectedColor : mutedColor))
+      options.legend = { ...(sourceOptions.legend ?? {}), show: false }
+      options.plotOptions = {
+        ...(sourceOptions.plotOptions ?? {}),
+        bar: {
+          ...(sourceOptions.plotOptions?.bar ?? {}),
+          distributed: true,
+        },
+      }
+    } else {
+      options.markers = {
+        ...(options.markers ?? {}),
+        discrete: [
+          ...(options.markers?.discrete ?? []),
+          {
+            seriesIndex: 0,
+            dataPointIndex: selectedPointIndex,
+            fillColor: selectedColor,
+            strokeColor: '#0b4f49',
+            size: 7,
+          },
+        ],
+      }
+    }
+  }
+
   return (
     <article
       className={
-        isDragging ? 'visual-chart-card visual-chart-card--dragging' : 'visual-chart-card'
+        [
+          'visual-chart-card',
+          isDragging ? 'visual-chart-card--dragging' : '',
+          isFilterableChart ? 'visual-chart-card--filterable' : '',
+          selectedPointIndex >= 0 ? 'visual-chart-card--filtered' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
       }
       draggable={!isFinalized}
       onDragStart={isFinalized ? undefined : onDragStart}
@@ -236,79 +1116,72 @@ function ManualChartBuilder({
           className="visual-secondary-button"
           onClick={onToggle}
         >
-          {isOpen ? 'Close Builder' : '+ Create New Chart'}
+          <IconButtonContent icon={isOpen ? 'close' : 'plus'} label={isOpen ? 'Close builder' : 'Create new chart'} showLabel />
         </button>
       </header>
 
       {isOpen ? (
-        <div className="visual-builder-grid">
-          <label>
-            <span>Chart type</span>
-            <select
-              value={settings.chart_type}
-              onChange={(event) => onSettingChange('chart_type', event.target.value)}
-            >
-              {CHART_TYPE_OPTIONS.map((option) => (
-                <option key={`manual-${option.value}`} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+        <>
+          <ChartTypeSelector
+            value={settings.chart_type}
+            onChange={(value) => onSettingChange('chart_type', value)}
+          />
 
-          <label>
-            <span>X-axis</span>
-            <select
-              value={settings.x_axis}
-              onChange={(event) => onSettingChange('x_axis', event.target.value)}
-            >
-              <option value="">None</option>
-              {columns.map((column) => (
-                <option key={`manual-x-${column}`} value={column}>
-                  {column}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="visual-builder-grid">
+            <label>
+              <span>X-axis</span>
+              <select
+                value={settings.x_axis}
+                onChange={(event) => onSettingChange('x_axis', event.target.value)}
+              >
+                <option value="">None</option>
+                {columns.map((column) => (
+                  <option key={`manual-x-${column}`} value={column}>
+                    {column}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label>
-            <span>Y-axis</span>
-            <select
-              value={settings.y_axis}
-              onChange={(event) => onSettingChange('y_axis', event.target.value)}
-            >
-              <option value="">Record count</option>
-              {numericColumns.map((column) => (
-                <option key={`manual-y-${column}`} value={column}>
-                  {column}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label>
+              <span>Y-axis</span>
+              <select
+                value={settings.y_axis}
+                onChange={(event) => onSettingChange('y_axis', event.target.value)}
+              >
+                <option value="">Record count</option>
+                {numericColumns.map((column) => (
+                  <option key={`manual-y-${column}`} value={column}>
+                    {column}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label>
-            <span>Aggregation</span>
-            <select
-              value={settings.aggregation}
-              onChange={(event) => onSettingChange('aggregation', event.target.value)}
-            >
-              {AGGREGATION_OPTIONS.map((option) => (
-                <option key={`manual-${option.value}`} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label>
+              <span>Aggregation</span>
+              <select
+                value={settings.aggregation}
+                onChange={(event) => onSettingChange('aggregation', event.target.value)}
+              >
+                {AGGREGATION_OPTIONS.map((option) => (
+                  <option key={`manual-${option.value}`} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <button
-            type="button"
-            className="visual-apply-button"
-            onClick={onRender}
-            disabled={isRendering || columns.length === 0}
-          >
-            {isRendering ? 'Adding...' : 'Add Chart'}
-          </button>
-        </div>
+            <button
+              type="button"
+              className="visual-apply-button"
+              onClick={onRender}
+              disabled={isRendering || columns.length === 0}
+            >
+              <IconButtonContent icon="plus" label={isRendering ? 'Adding' : 'Add chart'} showLabel />
+            </button>
+          </div>
+        </>
       ) : null}
     </section>
   )
@@ -370,196 +1243,216 @@ function filterHasValue(filterState, filter) {
   return (state.values ?? []).length > 0
 }
 
-function GlobalFilterPanel({
-  filters,
-  filterState,
+function ActiveFilterChips({
   activeFilters,
   disabled,
-  onFilterChange,
+  onRemoveFilter,
   onClearFilters,
 }) {
-  if (!filters.length) {
-    return null
-  }
-
   return (
-    <section className="visual-filter-panel">
-      <header className="visual-section-title">
-        <div>
-          <h2>Global Filters</h2>
-          <p>{activeFilters.length ? `${activeFilters.length} active filters` : 'No filters applied'}</p>
-        </div>
-        <button
-          type="button"
-          className="visual-secondary-button"
-          onClick={onClearFilters}
-          disabled={disabled || activeFilters.length === 0}
-        >
-          Clear All
-        </button>
-      </header>
-
-      <div className="visual-filter-grid">
-        {filters.map((filter) => {
-          const state = filterState[filter.column] ?? {}
-
-          if (filter.type === 'datetime') {
-            return (
-              <div className="visual-filter-control" key={`filter-${filter.column}`}>
-                <span>{filter.column}</span>
-                <div className="visual-filter-range">
-                  <input
-                    type="date"
-                    value={state.start ?? ''}
-                    min={filter.start ?? undefined}
-                    max={filter.end ?? undefined}
-                    onChange={(event) =>
-                      onFilterChange(filter.column, {
-                        ...state,
-                        start: event.target.value,
-                      })
-                    }
-                    disabled={disabled}
-                  />
-                  <input
-                    type="date"
-                    value={state.end ?? ''}
-                    min={filter.start ?? undefined}
-                    max={filter.end ?? undefined}
-                    onChange={(event) =>
-                      onFilterChange(filter.column, {
-                        ...state,
-                        end: event.target.value,
-                      })
-                    }
-                    disabled={disabled}
-                  />
-                </div>
-              </div>
-            )
-          }
-
-          if (filter.type === 'numeric') {
-            const minValue = Number(filter.min ?? 0)
-            const maxValue = Number(filter.max ?? minValue)
-            const lowerValue = Number(state.min ?? minValue)
-            const upperValue = Number(state.max ?? maxValue)
-
-            return (
-              <div className="visual-filter-control" key={`filter-${filter.column}`}>
-                <span>{filter.column}</span>
-                <div className="visual-filter-range-values">
-                  <small>{formatValue(lowerValue)}</small>
-                  <small>{formatValue(upperValue)}</small>
-                </div>
-                <input
-                  type="range"
-                  min={minValue}
-                  max={maxValue}
-                  step="any"
-                  value={lowerValue}
-                  onChange={(event) =>
-                    onFilterChange(filter.column, {
-                      ...state,
-                      min: Math.min(Number(event.target.value), upperValue),
-                    })
-                  }
-                  disabled={disabled || minValue === maxValue}
-                />
-                <input
-                  type="range"
-                  min={minValue}
-                  max={maxValue}
-                  step="any"
-                  value={upperValue}
-                  onChange={(event) =>
-                    onFilterChange(filter.column, {
-                      ...state,
-                      max: Math.max(Number(event.target.value), lowerValue),
-                    })
-                  }
-                  disabled={disabled || minValue === maxValue}
-                />
-              </div>
-            )
-          }
-
-          return (
-            <label className="visual-filter-control" key={`filter-${filter.column}`}>
-              <span>{filter.column}</span>
-              <select
-                value={(state.values ?? [])[0] ?? ''}
-                onChange={(event) =>
-                  onFilterChange(
-                    filter.column,
-                    event.target.value ? { values: [event.target.value] } : {},
-                  )
-                }
-                disabled={disabled}
-              >
-                <option value="">All values</option>
-                {(filter.options ?? []).map((option) => (
-                  <option key={`${filter.column}-${option.label}`} value={option.label}>
-                    {option.label} ({option.count})
-                  </option>
-                ))}
-              </select>
-            </label>
-          )
-        })}
+    <section className="visual-active-filter-bar" aria-label="Active dashboard filters">
+      <div className="visual-active-filter-title">
+        <span>Active Filters</span>
+        <p>
+          {activeFilters.length
+            ? `${activeFilters.length} chart ${activeFilters.length === 1 ? 'filter' : 'filters'} applied`
+            : 'Click a chart value to filter the dashboard.'}
+        </p>
       </div>
 
       {activeFilters.length ? (
-        <div className="visual-filter-chips">
+        <div className="visual-active-filter-list">
           {activeFilters.map((filter) => (
             <button
               type="button"
-              key={`${filter.column}-${filter.label}`}
-              onClick={() => onFilterChange(filter.column, {})}
+              className="visual-filter-chip"
+              key={`${filter.column}-${filter.valueLabel}`}
+              onClick={() => onRemoveFilter(filter.column)}
               disabled={disabled}
+              title={`Remove ${filter.label}`}
             >
-              {filter.label}
+              <span>{filter.column}:</span>
+              <strong>{filter.valueLabel}</strong>
+              <small aria-hidden="true">x</small>
             </button>
           ))}
         </div>
+      ) : null}
+
+      {activeFilters.length > 1 ? (
+        <button
+          type="button"
+          className="visual-clear-filters"
+          onClick={onClearFilters}
+          disabled={disabled}
+        >
+          Clear All
+        </button>
       ) : null}
     </section>
   )
 }
 
-function FilteredDataTable({ columns, rows }) {
-  const [page, setPage] = useState(1)
-  const totalPages = Math.max(1, Math.ceil(rows.length / DATA_TABLE_PAGE_SIZE))
-  const safePage = Math.min(page, totalPages)
-  const startIndex = (safePage - 1) * DATA_TABLE_PAGE_SIZE
-  const visibleRows = rows.slice(startIndex, startIndex + DATA_TABLE_PAGE_SIZE)
+function CanvasChartVisual({
+  visual,
+  rows,
+  filterMetadataByColumn,
+  filterState,
+  onChartValueSelect,
+}) {
+  const chart = buildCanvasChart(visual, rows)
+  const apexType = APEX_TYPES.has(chart?.type) ? chart.type : 'bar'
+  const series = Array.isArray(chart?.series) ? chart.series : []
+  const sourceOptions = chart?.options ?? {}
+  const filterColumn = getChartFilterColumn(chart)
+  const chartFilter = filterColumn ? filterMetadataByColumn?.get(filterColumn) : null
+  const chartFilterState = filterColumn ? filterState?.[filterColumn] : null
+  const isFilterableChart = Boolean(!chart?.empty && chartFilter && onChartValueSelect)
+  const pointValues = getChartPointValues(chart, sourceOptions, series)
+  const selectedPointIndex =
+    chartFilter && chartFilterState
+      ? pointValues.findIndex((value) => chartPointMatchesFilter(chartFilter, chartFilterState, value))
+      : -1
+  const sourceChartOptions = sourceOptions.chart ?? {}
+  const sourceEvents = sourceChartOptions.events ?? {}
+  const options = {
+    ...sourceOptions,
+    chart: {
+      ...sourceChartOptions,
+      toolbar: { show: false },
+      events: {
+        ...sourceEvents,
+        dataPointSelection: (event, chartContext, config) => {
+          if (typeof sourceEvents.dataPointSelection === 'function') {
+            sourceEvents.dataPointSelection(event, chartContext, config)
+          }
+
+          if (!isFilterableChart) {
+            return
+          }
+
+          const selectedValue = resolveChartPointValue(chart, sourceOptions, series, config)
+          if (selectedValue === null || selectedValue === undefined) {
+            return
+          }
+
+          onChartValueSelect(filterColumn, selectedValue)
+        },
+      },
+    },
+    tooltip: {
+      ...(sourceOptions.tooltip ?? {}),
+      shared: false,
+      intersect: true,
+    },
+  }
+  const chartHeight = Math.max(112, visual.height - (visual.settings?.caption ? 106 : 82))
+
+  if (isFilterableChart && ['line', 'area', 'scatter'].includes(apexType)) {
+    const sourceMarkerSize = Number(sourceOptions.markers?.size ?? 4)
+    options.markers = {
+      ...(sourceOptions.markers ?? {}),
+      size: sourceMarkerSize > 0 ? sourceMarkerSize : 4,
+    }
+  }
+
+  if (isFilterableChart && selectedPointIndex >= 0) {
+    const selectedColor = visual.settings?.color || '#0f766e'
+    const mutedColor = '#d7e0db'
+
+    if (apexType === 'pie' || apexType === 'donut') {
+      options.colors = pointValues.map((_, index) => (index === selectedPointIndex ? selectedColor : mutedColor))
+    } else if (apexType === 'bar') {
+      options.colors = pointValues.map((_, index) => (index === selectedPointIndex ? selectedColor : mutedColor))
+      options.legend = { ...(sourceOptions.legend ?? {}), show: false }
+      options.plotOptions = {
+        ...(sourceOptions.plotOptions ?? {}),
+        bar: {
+          ...(sourceOptions.plotOptions?.bar ?? {}),
+          distributed: true,
+        },
+      }
+    } else {
+      options.markers = {
+        ...(options.markers ?? {}),
+        discrete: [
+          ...(options.markers?.discrete ?? []),
+          {
+            seriesIndex: 0,
+            dataPointIndex: selectedPointIndex,
+            fillColor: selectedColor,
+            strokeColor: '#0b4f49',
+            size: 7,
+          },
+        ],
+      }
+    }
+  }
 
   return (
-    <section className="visual-table-panel">
-      <header className="visual-table-head">
-        <div>
-          <h3>Filtered Data Table</h3>
-          <p>{formatValue(rows.length)} matching rows</p>
-        </div>
-      </header>
+    <div
+      className={
+        [
+          'blank-visual-inner',
+          isFilterableChart ? 'blank-visual-inner--filterable' : '',
+          selectedPointIndex >= 0 ? 'blank-visual-inner--filtered' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+      }
+    >
+      <div className="blank-visual-title">
+        <h3>{visual.settings?.title || chart.title}</h3>
+        {visual.settings?.subtitle ? <p>{visual.settings.subtitle}</p> : null}
+      </div>
+      {chart.empty ? (
+        <div className="blank-visual-empty">{chart.description}</div>
+      ) : (
+        <Chart options={options} series={series} type={apexType} height={chartHeight} width="100%" />
+      )}
+      {visual.settings?.caption ? <p className="blank-visual-caption">{visual.settings.caption}</p> : null}
+    </div>
+  )
+}
 
-      {columns.length && rows.length ? (
-        <div className="visual-table-scroll">
-          <table className="visual-data-table">
+function CanvasKpiVisual({ visual, rows }) {
+  const kpi = computeCanvasKpi(visual, rows)
+
+  return (
+    <div className="blank-kpi-visual">
+      <span>{kpi.label}</span>
+      <strong>{kpi.value}</strong>
+      <small>{kpi.hint}</small>
+      {visual.settings?.caption ? <p>{visual.settings.caption}</p> : null}
+    </div>
+  )
+}
+
+function CanvasTableVisual({ visual, rows }) {
+  const selectedColumns = visual.fields?.values?.length ? visual.fields.values : []
+  const visibleRows = rows.slice(0, 40)
+
+  return (
+    <div className="blank-table-visual">
+      <div className="blank-visual-title">
+        <h3>{getCanvasVisualTitle(visual)}</h3>
+        {visual.settings?.subtitle ? <p>{visual.settings.subtitle}</p> : null}
+      </div>
+      {selectedColumns.length ? (
+        <div className="blank-table-scroll">
+          <table>
             <thead>
               <tr>
-                {columns.map((column) => (
-                  <th key={`visual-table-${column}`}>{column}</th>
+                {selectedColumns.map((column) => (
+                  <th key={`${visual.id}-head-${column}`}>{column}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {visibleRows.map((row, rowIndex) => (
-                <tr key={`filtered-row-${startIndex + rowIndex}`}>
-                  {columns.map((column) => (
-                    <td key={`${column}-${startIndex + rowIndex}`}>
-                      {formatValue(row?.[column], { empty: '' })}
-                    </td>
+                <tr key={`${visual.id}-row-${rowIndex}`}>
+                  {selectedColumns.map((column) => (
+                    <td key={`${visual.id}-${rowIndex}-${column}`}>{formatValue(row[column])}</td>
                   ))}
                 </tr>
               ))}
@@ -567,36 +1460,452 @@ function FilteredDataTable({ columns, rows }) {
           </table>
         </div>
       ) : (
-        <div className="visual-table-empty">No data available for the active filters.</div>
+        <div className="blank-visual-empty">Drag fields here to build this visual.</div>
       )}
+      {visual.settings?.caption ? <p className="blank-visual-caption">{visual.settings.caption}</p> : null}
+    </div>
+  )
+}
 
-      <footer className="visual-table-footer">
-        <span>
-          Showing {rows.length === 0 ? 0 : startIndex + 1}-{Math.min(startIndex + DATA_TABLE_PAGE_SIZE, rows.length)}
-        </span>
-        <div>
+function CanvasTextVisual({ visual }) {
+  return (
+    <div className="blank-text-visual">
+      {visual.settings?.title ? <h3>{visual.settings.title}</h3> : null}
+      <p>{visual.content}</p>
+      {visual.settings?.caption ? <small>{visual.settings.caption}</small> : null}
+    </div>
+  )
+}
+
+function CanvasVisual({
+  visual,
+  rows,
+  isSelected,
+  isFinalized,
+  filterMetadataByColumn,
+  filterState,
+  onSelect,
+  onRemove,
+  onDragStart,
+  onResizeStart,
+  onChartValueSelect,
+}) {
+  const visualStyle = {
+    width: visual.width,
+    height: visual.height,
+    transform: `translate(${visual.x}px, ${visual.y}px)`,
+    backgroundColor: visual.settings?.backgroundColor || '#ffffff',
+    borderRadius: `${visual.settings?.borderRadius ?? 8}px`,
+    fontFamily: visual.settings?.fontFamily,
+    fontSize: `${visual.settings?.fontSize ?? 13}px`,
+    '--blank-accent': visual.settings?.color || '#0f766e',
+  }
+
+  return (
+    <article
+      className={isSelected ? 'blank-canvas-visual blank-canvas-visual--selected' : 'blank-canvas-visual'}
+      style={visualStyle}
+      onPointerDown={() => onSelect(visual.id)}
+    >
+      {!isFinalized ? (
+        <header className="blank-visual-handle" onPointerDown={(event) => onDragStart(event, visual)}>
+          <span>{visual.kind}</span>
           <button
             type="button"
-            className="visual-small-button"
-            onClick={() => setPage((current) => Math.max(1, current - 1))}
-            disabled={safePage <= 1}
+            aria-label="Remove visual"
+            title="Remove visual"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => onRemove(visual.id)}
           >
-            Previous
+            x
           </button>
-          <strong>
-            {safePage} / {totalPages}
-          </strong>
-          <button
-            type="button"
-            className="visual-small-button"
-            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-            disabled={safePage >= totalPages}
-          >
-            Next
-          </button>
+        </header>
+      ) : null}
+
+      <div className="blank-visual-content">
+        {visual.kind === 'chart' ? (
+          <CanvasChartVisual
+            visual={visual}
+            rows={rows}
+            filterMetadataByColumn={filterMetadataByColumn}
+            filterState={filterState}
+            onChartValueSelect={onChartValueSelect}
+          />
+        ) : null}
+        {visual.kind === 'kpi' ? <CanvasKpiVisual visual={visual} rows={rows} /> : null}
+        {visual.kind === 'table' ? <CanvasTableVisual visual={visual} rows={rows} /> : null}
+        {visual.kind === 'text' ? <CanvasTextVisual visual={visual} /> : null}
+      </div>
+
+      {!isFinalized ? (
+        <>
+          <span
+            className="blank-resize-handle blank-resize-handle--right"
+            onPointerDown={(event) => onResizeStart(event, visual, 'right')}
+            aria-hidden="true"
+          />
+          <span
+            className="blank-resize-handle blank-resize-handle--bottom"
+            onPointerDown={(event) => onResizeStart(event, visual, 'bottom')}
+            aria-hidden="true"
+          />
+          <span
+            className="blank-resize-handle blank-resize-handle--corner"
+            onPointerDown={(event) => onResizeStart(event, visual, 'corner')}
+            aria-hidden="true"
+          />
+        </>
+      ) : null}
+    </article>
+  )
+}
+
+function FieldDropZone({
+  label,
+  value,
+  multiple = false,
+  acceptedTypes = ['any'],
+  columnProfiles,
+  onDropField,
+  onRemoveField,
+}) {
+  const values = multiple ? value ?? [] : value ? [value] : []
+  const warnings = values
+    .map((fieldName) => getFieldWellWarning(fieldName, acceptedTypes, columnProfiles))
+    .filter(Boolean)
+
+  return (
+    <div
+      className="blank-field-dropzone"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.preventDefault()
+        const fieldName = event.dataTransfer.getData('text/plain')
+        if (fieldName) {
+          onDropField(fieldName)
+        }
+      }}
+    >
+      <header>
+        <span>{label}</span>
+        <small>{acceptedTypes.includes('any') ? 'Any field' : acceptedTypes.join(' / ')}</small>
+      </header>
+      <div>
+        {values.length ? (
+          values.map((fieldName) => (
+            <button
+              type="button"
+              key={`${label}-${fieldName}`}
+              onClick={() => onRemoveField(fieldName)}
+            >
+              {fieldName} <small aria-hidden="true">x</small>
+            </button>
+          ))
+        ) : (
+          <em>Drop field</em>
+        )}
+      </div>
+      {warnings.length ? <p>{warnings[0]}</p> : null}
+    </div>
+  )
+}
+
+function BlankCanvasSidebar({
+  columns,
+  columnProfiles,
+  selectedVisual,
+  onAddVisual,
+  onUpdateField,
+  onUpdateSetting,
+  onUpdateContent,
+  onRemoveVisual,
+}) {
+  const fieldWells = selectedVisual ? getFieldWellsForVisual(selectedVisual) : []
+  const selectedChartType = selectedVisual?.settings?.chart_type || selectedVisual?.type
+
+  return (
+    <aside className="blank-builder-sidebar">
+      <section>
+        <h2>Visualizations</h2>
+        <div className="blank-visual-button-grid">
+          {CANVAS_VISUAL_TYPES.map((visualType) => (
+            <button
+              type="button"
+              key={`canvas-add-${visualType.value}`}
+              onClick={() => onAddVisual(visualType.value)}
+              title={visualType.label}
+              aria-label={visualType.label}
+            >
+              <ChartTypeIcon type={visualType.icon} />
+              <span>{visualType.label}</span>
+            </button>
+          ))}
         </div>
-      </footer>
-    </section>
+      </section>
+
+      <section>
+        <h2>Data Fields</h2>
+        <div className="blank-field-list">
+          {columns.map((column) => (
+            <button
+              type="button"
+              key={`canvas-field-${column}`}
+              draggable
+              onDragStart={(event) => event.dataTransfer.setData('text/plain', column)}
+            >
+              <span>{column}</span>
+              <small className={`blank-field-type blank-field-type--${getDisplayColumnType(column, columnProfiles)}`}>
+                {getDisplayColumnType(column, columnProfiles)}
+              </small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <h2>Settings</h2>
+        {selectedVisual ? (
+          <div className="blank-settings-panel">
+            {selectedVisual.kind === 'chart' ? (
+              <div className="blank-settings-group">
+                <ChartTypeSelector
+                  value={selectedChartType}
+                  onChange={(value) => onUpdateSetting(selectedVisual.id, 'chart_type', value)}
+                />
+              </div>
+            ) : null}
+
+            <div className="blank-field-well-stack">
+              {fieldWells.map((well) => (
+                <FieldDropZone
+                  key={`${selectedVisual.id}-${well.field}`}
+                  label={well.label}
+                  value={
+                    well.multiple
+                      ? selectedVisual.fields?.[well.field] ?? []
+                      : well.field === 'values'
+                        ? selectedVisual.fields?.values?.[0]
+                        : selectedVisual.fields?.[well.field]
+                  }
+                  multiple={well.multiple}
+                  acceptedTypes={well.acceptedTypes}
+                  columnProfiles={columnProfiles}
+                  onDropField={(fieldName) =>
+                    onUpdateField(selectedVisual.id, well.field, fieldName, false, well.multiple)
+                  }
+                  onRemoveField={(fieldName) =>
+                    onUpdateField(selectedVisual.id, well.field, fieldName, true, well.multiple)
+                  }
+                />
+              ))}
+            </div>
+
+            {['chart', 'kpi'].includes(selectedVisual.kind) ? (
+              <label>
+                <span>Aggregation</span>
+                <select
+                  value={selectedVisual.settings?.aggregation || 'count'}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'aggregation', event.target.value)}
+                >
+                  {AGGREGATION_OPTIONS.map((option) => (
+                    <option key={`canvas-agg-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+
+            <label>
+              <span>Title</span>
+              <input
+                type="text"
+                value={getCanvasVisualTitle(selectedVisual)}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'title', event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Subtitle</span>
+              <input
+                type="text"
+                value={selectedVisual.settings?.subtitle ?? ''}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'subtitle', event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Caption</span>
+              <input
+                type="text"
+                value={selectedVisual.settings?.caption ?? ''}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'caption', event.target.value)}
+              />
+            </label>
+
+            {selectedVisual.kind === 'text' ? (
+              <label>
+                <span>Text</span>
+                <textarea
+                  value={selectedVisual.content ?? ''}
+                  onChange={(event) => onUpdateContent(selectedVisual.id, event.target.value)}
+                />
+              </label>
+            ) : null}
+
+            <label>
+              <span>Font Family</span>
+              <select
+                value={selectedVisual.settings?.fontFamily || FONT_FAMILY_OPTIONS[0].value}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontFamily', event.target.value)}
+              >
+                {FONT_FAMILY_OPTIONS.map((option) => (
+                  <option key={`canvas-font-${option.value}`} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Font Size</span>
+              <input
+                type="number"
+                min="10"
+                max="48"
+                value={selectedVisual.settings?.fontSize ?? 13}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontSize', Number(event.target.value))}
+              />
+            </label>
+
+            <div className="blank-color-grid">
+              <label>
+                <span>Color</span>
+                <input
+                  type="color"
+                  value={selectedVisual.settings?.color || CANVAS_PALETTE[0]}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'color', event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Background</span>
+                <input
+                  type="color"
+                  value={selectedVisual.settings?.backgroundColor || '#ffffff'}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'backgroundColor', event.target.value)}
+                />
+              </label>
+            </div>
+
+            {selectedVisual.kind === 'chart' ? (
+              <div className="blank-toggle-grid">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selectedVisual.settings?.showLegend)}
+                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLegend', event.target.checked)}
+                  />
+                  <span>Legend</span>
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selectedVisual.settings?.showLabels)}
+                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLabels', event.target.checked)}
+                  />
+                  <span>Labels</span>
+                </label>
+              </div>
+            ) : null}
+
+            <label>
+              <span>Border Radius</span>
+              <input
+                type="number"
+                min="0"
+                max="28"
+                value={selectedVisual.settings?.borderRadius ?? 8}
+                onChange={(event) => onUpdateSetting(selectedVisual.id, 'borderRadius', Number(event.target.value))}
+              />
+            </label>
+
+            <button type="button" className="visual-card-remove-button" onClick={() => onRemoveVisual(selectedVisual.id)}>
+              Remove Visual
+            </button>
+          </div>
+        ) : (
+          <p className="blank-sidebar-empty">No visual selected</p>
+        )}
+      </section>
+    </aside>
+  )
+}
+
+function BlankCanvasBuilder({
+  captureRef,
+  canvasRef,
+  visuals,
+  selectedVisualId,
+  isFinalized,
+  rows,
+  columns,
+  columnProfiles,
+  filterMetadataByColumn,
+  filterState,
+  onSelectVisual,
+  onAddVisual,
+  onRemoveVisual,
+  onUpdateField,
+  onUpdateSetting,
+  onUpdateContent,
+  onDragStart,
+  onResizeStart,
+  onCanvasBackgroundClick,
+  onChartValueSelect,
+}) {
+  const selectedVisual = visuals.find((visual) => visual.id === selectedVisualId) ?? null
+
+  return (
+    <div className="blank-builder-shell">
+      <main className="blank-builder-main">
+        <div ref={captureRef} className="blank-report-capture">
+          <section
+            ref={canvasRef}
+            className="blank-report-canvas"
+            style={{ width: CANVAS_SIZE.width, height: CANVAS_SIZE.height }}
+            onPointerDown={onCanvasBackgroundClick}
+          >
+            {visuals.map((visual) => (
+              <CanvasVisual
+                key={visual.id}
+                visual={visual}
+                rows={rows}
+                isSelected={visual.id === selectedVisualId}
+                isFinalized={isFinalized}
+                filterMetadataByColumn={filterMetadataByColumn}
+                filterState={filterState}
+                onSelect={onSelectVisual}
+                onRemove={onRemoveVisual}
+                onDragStart={onDragStart}
+                onResizeStart={onResizeStart}
+                onChartValueSelect={onChartValueSelect}
+              />
+            ))}
+            {!visuals.length ? <div className="blank-canvas-empty"><h3>Blank Canvas</h3></div> : null}
+          </section>
+        </div>
+      </main>
+
+      {!isFinalized ? (
+        <BlankCanvasSidebar
+          columns={columns}
+          columnProfiles={columnProfiles}
+          selectedVisual={selectedVisual}
+          onAddVisual={onAddVisual}
+          onUpdateField={onUpdateField}
+          onUpdateSetting={onUpdateSetting}
+          onUpdateContent={onUpdateContent}
+          onRemoveVisual={onRemoveVisual}
+        />
+      ) : null}
+    </div>
   )
 }
 
@@ -604,6 +1913,7 @@ function DashboardEditorPanel({
   editor,
   chart,
   kpi,
+  note,
   columns,
   numericColumns,
   settings,
@@ -615,14 +1925,49 @@ function DashboardEditorPanel({
   onApplyChart,
   onChartTextChange,
   onKpiTextChange,
+  onCustomKpiValueChange,
+  onNoteChange,
 }) {
   if (!editor) {
     return null
   }
 
+  if (editor.type === 'note') {
+    return (
+      <aside className="visual-side-panel">
+        <header>
+          <div>
+            <span>Workspace Widget</span>
+            <h2>Edit Note</h2>
+          </div>
+          <button type="button" className="visual-small-button" onClick={onClose}>
+            Close
+          </button>
+        </header>
+        <label>
+          <span>Title</span>
+          <input
+            type="text"
+            value={note?.title ?? ''}
+            onChange={(event) => onNoteChange(editor.noteId, 'title', event.target.value)}
+          />
+        </label>
+        <label>
+          <span>Body</span>
+          <textarea
+            value={note?.body ?? ''}
+            maxLength={280}
+            onChange={(event) => onNoteChange(editor.noteId, 'body', event.target.value)}
+          />
+        </label>
+      </aside>
+    )
+  }
+
   if (editor.type === 'kpi') {
     const title = kpiText?.title || kpi?.label || ''
     const subtitle = kpiText?.subtitle || kpi?.hint || ''
+    const isCustomKpi = kpi?.source === 'custom'
 
     return (
       <aside className="visual-side-panel">
@@ -643,6 +1988,16 @@ function DashboardEditorPanel({
             onChange={(event) => onKpiTextChange(editor.textKey, 'title', event.target.value)}
           />
         </label>
+        {isCustomKpi ? (
+          <label>
+            <span>Value</span>
+            <input
+              type="text"
+              value={kpi?.value ?? ''}
+              onChange={(event) => onCustomKpiValueChange(editor.textKey, event.target.value)}
+            />
+          </label>
+        ) : null}
         <label>
           <span>Subtitle</span>
           <input
@@ -704,19 +2059,10 @@ function DashboardEditorPanel({
         </>
       ) : (
         <>
-          <label>
-            <span>Chart type</span>
-            <select
-              value={settings.chart_type}
-              onChange={(event) => onSettingChange(chart.id, 'chart_type', event.target.value)}
-            >
-              {CHART_TYPE_OPTIONS.map((option) => (
-                <option key={`panel-${option.value}`} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <ChartTypeSelector
+            value={settings.chart_type}
+            onChange={(value) => onSettingChange(chart.id, 'chart_type', value)}
+          />
 
           <label>
             <span>X-axis</span>
@@ -802,9 +2148,13 @@ function VisualizationPage() {
     aggregation: 'count',
   })
   const [manualCharts, setManualCharts] = useState([])
+  const [customKpis, setCustomKpis] = useState([])
+  const [customNotes, setCustomNotes] = useState([])
   const [customChartsById, setCustomChartsById] = useState({})
   const [hiddenChartIds, setHiddenChartIds] = useState([])
   const [hiddenKpiKeys, setHiddenKpiKeys] = useState([])
+  const [workspaceMode, setWorkspaceMode] = useState('suggested')
+  const [workspaceWidgets, setWorkspaceWidgets] = useState(DEFAULT_WORKSPACE_WIDGETS)
   const [chartOrder, setChartOrder] = useState([])
   const [draggingChartId, setDraggingChartId] = useState('')
   const [isFinalized, setIsFinalized] = useState(false)
@@ -815,50 +2165,78 @@ function VisualizationPage() {
   const [filterMetadata, setFilterMetadata] = useState([])
   const [kpiTextByKey, setKpiTextByKey] = useState({})
   const [chartTextById, setChartTextById] = useState({})
+  const [canvasVisuals, setCanvasVisuals] = useState([])
+  const [selectedCanvasVisualId, setSelectedCanvasVisualId] = useState('')
+  const [canvasInteraction, setCanvasInteraction] = useState(null)
+  const [hydratedCanvasDatasetId, setHydratedCanvasDatasetId] = useState('')
   const [activeEditor, setActiveEditor] = useState(null)
   const [openChartMenuId, setOpenChartMenuId] = useState('')
   const [isBuilderOpen, setIsBuilderOpen] = useState(false)
   const dashboardCaptureRef = useRef(null)
+  const blankCanvasRef = useRef(null)
 
   const dashboard = localDashboard ?? storedCharts
   const sourceColumns = useMemo(() => uploadedDataset.columns ?? [], [uploadedDataset.columns])
   const sourceRows = useMemo(() => uploadedDataset.rows ?? [], [uploadedDataset.rows])
   const tableColumns = dashboard?.table?.columns?.length ? dashboard.table.columns : sourceColumns
   const tableRows = dashboard?.table?.rows ?? sourceRows
+  const columnProfiles = useMemo(() => {
+    if (Array.isArray(dashboard?.columns) && dashboard.columns.length) {
+      return dashboard.columns
+    }
+
+    return activeProfile?.column_profiles ?? []
+  }, [activeProfile, dashboard])
   const numericColumns = useMemo(() => {
     if (dashboard?.column_types?.numeric?.length) {
       return dashboard.column_types.numeric
     }
 
-    return (activeProfile?.column_profiles ?? [])
+    return columnProfiles
       .filter((column) => String(column.dtype).toLowerCase().includes('int') || String(column.dtype).toLowerCase().includes('float'))
       .map((column) => column.name)
-  }, [activeProfile, dashboard])
+  }, [columnProfiles, dashboard])
   const chartConfigs = useMemo(() => dashboard?.chart_configs ?? [], [dashboard])
   const renderedCharts = chartConfigs.map((chart) => customChartsById[chart.id] ?? chart)
   const summary = dashboard?.summary ?? {}
-  const insightKpis = Array.isArray(dashboard?.insight_kpis)
-    ? dashboard.insight_kpis
-    : Array.isArray(dashboard?.kpis)
-      ? dashboard.kpis
-      : []
-  const fallbackKpis = [
-    {
-      label: 'Total Records',
-      value: formatValue(summary.total_rows ?? tableRows.length),
-      hint: 'Rows in the cleaned dataset',
-    },
-  ]
-  const kpiCards = insightKpis.length > 0 ? insightKpis : fallbackKpis
+  const insightKpis = useMemo(() => {
+    if (Array.isArray(dashboard?.insight_kpis)) {
+      return dashboard.insight_kpis
+    }
+
+    if (Array.isArray(dashboard?.kpis)) {
+      return dashboard.kpis
+    }
+
+    return []
+  }, [dashboard])
+  const fallbackKpis = useMemo(
+    () => [
+      {
+        label: 'Total Records',
+        value: formatValue(summary.total_rows ?? tableRows.length),
+        hint: 'Rows in the cleaned dataset',
+      },
+    ],
+    [summary.total_rows, tableRows.length],
+  )
+  const autoKpiCards = useMemo(
+    () => (insightKpis.length > 0 ? insightKpis : fallbackKpis),
+    [fallbackKpis, insightKpis],
+  )
+  const kpiCards = useMemo(
+    () => (workspaceMode === 'blank' ? customKpis : [...autoKpiCards, ...customKpis]),
+    [autoKpiCards, customKpis, workspaceMode],
+  )
   const hasDatasetPayload = sourceColumns.length > 0 || sourceRows.length > 0
   const hiddenChartIdSet = useMemo(() => new Set(hiddenChartIds), [hiddenChartIds])
   const hiddenKpiKeySet = useMemo(() => new Set(hiddenKpiKeys), [hiddenKpiKeys])
   const dashboardCharts = useMemo(
-    () => [...renderedCharts, ...manualCharts],
-    [manualCharts, renderedCharts],
+    () => (workspaceMode === 'blank' ? manualCharts : [...renderedCharts, ...manualCharts]),
+    [manualCharts, renderedCharts, workspaceMode],
   )
   const visibleKpiCards = useMemo(
-    () => kpiCards.filter((kpi, index) => !hiddenKpiKeySet.has(getKpiTextKey(kpi, index))),
+    () => kpiCards.filter((kpi, index) => !hiddenKpiKeySet.has(getKpiInstanceKey(kpi, index))),
     [hiddenKpiKeySet, kpiCards],
   )
   const visibleCharts = useMemo(() => {
@@ -871,18 +2249,13 @@ function VisualizationPage() {
 
     return [...orderedCharts, ...unorderedCharts]
   }, [chartOrder, dashboardCharts, hiddenChartIdSet])
-  const presentationKpis = isFinalized && finalizedDashboard?.kpis ? finalizedDashboard.kpis : visibleKpiCards
-  const presentationCharts = isFinalized && finalizedDashboard?.charts ? finalizedDashboard.charts : visibleCharts
-  const presentationKpiText = isFinalized && finalizedDashboard?.kpiTextByKey
-    ? finalizedDashboard.kpiTextByKey
-    : kpiTextByKey
-  const presentationChartText = isFinalized && finalizedDashboard?.chartTextById
-    ? finalizedDashboard.chartTextById
-    : chartTextById
   const filterPayload = useMemo(
     () => buildFilterPayload(filterState, filterMetadata),
     [filterMetadata, filterState],
   )
+  const filterMetadataByColumn = useMemo(() => {
+    return new Map(filterMetadata.map((filter) => [filter.column, filter]))
+  }, [filterMetadata])
   const chartOverridePayload = useMemo(() => {
     const customizedAutoCharts = Object.keys(customChartsById)
       .map((chartId) => ({
@@ -912,26 +2285,31 @@ function VisualizationPage() {
       .filter((filter) => filterHasValue(filterState, filter))
       .map((filter) => {
         const state = filterState[filter.column] ?? {}
-        if (filter.type === 'datetime') {
-          return {
-            column: filter.column,
-            label: `${filter.column}: ${state.start || 'start'} to ${state.end || 'end'}`,
-          }
-        }
-
-        if (filter.type === 'numeric') {
-          return {
-            column: filter.column,
-            label: `${filter.column}: ${state.min ?? filter.min} to ${state.max ?? filter.max}`,
-          }
-        }
+        const valueLabel = formatActiveFilterValue(filter, state)
 
         return {
           column: filter.column,
-          label: `${filter.column}: ${(state.values ?? []).join(', ')}`,
+          valueLabel,
+          label: `${filter.column}: ${valueLabel}`,
         }
       })
   }, [filterMetadata, filterState])
+  const hasActiveFilters = activeFilters.length > 0
+  const presentationKpis = isFinalized && finalizedDashboard?.kpis && !hasActiveFilters
+    ? finalizedDashboard.kpis
+    : visibleKpiCards
+  const presentationCharts = isFinalized && finalizedDashboard?.charts && !hasActiveFilters
+    ? finalizedDashboard.charts
+    : visibleCharts
+  const presentationNotes = isFinalized && finalizedDashboard?.notes && !hasActiveFilters
+    ? finalizedDashboard.notes
+    : customNotes
+  const presentationKpiText = isFinalized && finalizedDashboard?.kpiTextByKey
+    ? finalizedDashboard.kpiTextByKey
+    : kpiTextByKey
+  const presentationChartText = isFinalized && finalizedDashboard?.chartTextById
+    ? finalizedDashboard.chartTextById
+    : chartTextById
   const savedAtLabel = finalizedDashboard?.savedAt
     ? new Intl.DateTimeFormat(undefined, {
         month: 'short',
@@ -949,9 +2327,22 @@ function VisualizationPage() {
   const activeChart = activeEditor?.type === 'chart'
     ? dashboardCharts.find((chart) => chart.id === activeEditor.chartId)
     : null
+  const activeKpi = activeEditor?.type === 'kpi'
+    ? kpiCards.find((kpi, index) => getKpiInstanceKey(kpi, index) === activeEditor.textKey) ?? null
+    : null
+  const activeNote = activeEditor?.type === 'note'
+    ? customNotes.find((note) => note.id === activeEditor.noteId) ?? null
+    : null
   const activeChartSettings = activeChart
     ? settingsById[activeChart.id] ?? buildDefaultSettings(activeChart, tableColumns, numericColumns)
     : null
+  const workspaceWidgetCount = workspaceMode === 'blank'
+    ? canvasVisuals.length
+    : visibleKpiCards.length + visibleCharts.length + customNotes.length
+  const presentationWidgetCount =
+    workspaceMode === 'blank'
+      ? canvasVisuals.length
+      : presentationKpis.length + presentationCharts.length + presentationNotes.length
 
   useEffect(() => {
     if (!datasetId || !hasDatasetPayload) {
@@ -970,14 +2361,27 @@ function VisualizationPage() {
           rows: sourceRows,
         })
         if (!cancelled) {
+          const savedCanvasLayout = getSavedCanvasLayout(datasetId)
+          const savedCanvasVisuals = Array.isArray(savedCanvasLayout?.visuals)
+            ? savedCanvasLayout.visuals
+            : []
+
           setLocalDashboard(payload)
           setCustomChartsById({})
           setManualCharts([])
+          setCustomKpis([])
+          setCustomNotes([])
           setHiddenChartIds([])
           setHiddenKpiKeys([])
+          setWorkspaceMode(savedCanvasLayout?.workspaceMode === 'blank' ? 'blank' : 'suggested')
+          setWorkspaceWidgets(DEFAULT_WORKSPACE_WIDGETS)
           setChartOrder((payload.chart_configs ?? []).map((chart) => chart.id))
           setFilterMetadata(payload.filters ?? [])
           setFilterState({})
+          setCanvasVisuals(savedCanvasVisuals)
+          setSelectedCanvasVisualId(savedCanvasVisuals[0]?.id ?? '')
+          setCanvasInteraction(null)
+          setHydratedCanvasDatasetId(datasetId)
           setIsFinalized(false)
           setFinalizedDashboard(null)
           setActiveEditor(null)
@@ -987,6 +2391,7 @@ function VisualizationPage() {
       } catch (error) {
         if (!cancelled) {
           setDashboardError(error.message)
+          setHydratedCanvasDatasetId(datasetId)
         }
       } finally {
         if (!cancelled) {
@@ -1003,7 +2408,7 @@ function VisualizationPage() {
   }, [datasetId, hasDatasetPayload, sourceColumns, sourceRows, visualizeDatasetRows])
 
   useEffect(() => {
-    if (!hasDatasetPayload || isFinalized || filterMetadata.length === 0) {
+    if (!hasDatasetPayload || filterMetadata.length === 0) {
       return
     }
 
@@ -1074,10 +2479,73 @@ function VisualizationPage() {
     filterMetadata.length,
     filterPayloadJson,
     hasDatasetPayload,
-    isFinalized,
     sourceColumns,
     sourceRows,
   ])
+
+  useEffect(() => {
+    if (!datasetId || hydratedCanvasDatasetId !== datasetId) {
+      return
+    }
+
+    saveCanvasLayout(datasetId, {
+      workspaceMode,
+      visuals: canvasVisuals,
+    })
+  }, [canvasVisuals, datasetId, hydratedCanvasDatasetId, workspaceMode])
+
+  useEffect(() => {
+    if (!canvasInteraction) {
+      return
+    }
+
+    function handlePointerMove(event) {
+      event.preventDefault()
+      const deltaX = event.clientX - canvasInteraction.startClientX
+      const deltaY = event.clientY - canvasInteraction.startClientY
+
+      setCanvasVisuals((previous) =>
+        previous.map((visual) => {
+          if (visual.id !== canvasInteraction.id) {
+            return visual
+          }
+
+          if (canvasInteraction.mode === 'move') {
+            return {
+              ...visual,
+              x: clampValue(canvasInteraction.startX + deltaX, 0, CANVAS_SIZE.width - visual.width),
+              y: clampValue(canvasInteraction.startY + deltaY, 0, CANVAS_SIZE.height - visual.height),
+            }
+          }
+
+          const shouldResizeWidth = ['right', 'corner'].includes(canvasInteraction.mode)
+          const shouldResizeHeight = ['bottom', 'corner'].includes(canvasInteraction.mode)
+
+          return {
+            ...visual,
+            width: shouldResizeWidth
+              ? clampValue(canvasInteraction.startWidth + deltaX, 180, CANVAS_SIZE.width - visual.x)
+              : visual.width,
+            height: shouldResizeHeight
+              ? clampValue(canvasInteraction.startHeight + deltaY, 120, CANVAS_SIZE.height - visual.y)
+              : visual.height,
+          }
+        }),
+      )
+    }
+
+    function handlePointerUp() {
+      setCanvasInteraction(null)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+    }
+  }, [canvasInteraction])
 
   async function regenerateDashboard() {
     if (!hasDatasetPayload) {
@@ -1095,8 +2563,12 @@ function VisualizationPage() {
       setLocalDashboard(payload)
       setCustomChartsById({})
       setManualCharts([])
+      setCustomKpis([])
+      setCustomNotes([])
       setHiddenChartIds([])
       setHiddenKpiKeys([])
+      setWorkspaceMode('suggested')
+      setWorkspaceWidgets(DEFAULT_WORKSPACE_WIDGETS)
       setChartOrder((payload.chart_configs ?? []).map((chart) => chart.id))
       setFilterMetadata(payload.filters ?? [])
       setFilterState({})
@@ -1172,6 +2644,224 @@ function VisualizationPage() {
     }
   }
 
+  function createBlankWorkspace() {
+    setWorkspaceMode('blank')
+    setWorkspaceWidgets(BLANK_WORKSPACE_WIDGETS)
+    setManualCharts([])
+    setCustomKpis([])
+    setCustomNotes([])
+    setCustomChartsById({})
+    setHiddenChartIds([])
+    setHiddenKpiKeys([])
+    setChartOrder([])
+    setSettingsById({})
+    setKpiTextByKey({})
+    setChartTextById({})
+    setCanvasVisuals([])
+    setSelectedCanvasVisualId('')
+    setCanvasInteraction(null)
+    setHydratedCanvasDatasetId(datasetId)
+    setIsFinalized(false)
+    setFinalizedDashboard(null)
+    setActiveEditor(null)
+    setOpenChartMenuId('')
+    setIsBuilderOpen(false)
+    setDraggingChartId('')
+    setDashboardError('')
+  }
+
+  function restoreSuggestedWorkspace() {
+    setWorkspaceMode('suggested')
+    setWorkspaceWidgets(DEFAULT_WORKSPACE_WIDGETS)
+    setManualCharts([])
+    setCustomKpis([])
+    setCustomNotes([])
+    setCustomChartsById({})
+    setHiddenChartIds([])
+    setHiddenKpiKeys([])
+    setChartOrder(chartConfigs.map((chart) => chart.id))
+    setSettingsById({})
+    setKpiTextByKey({})
+    setChartTextById({})
+    setSelectedCanvasVisualId('')
+    setCanvasInteraction(null)
+    setIsFinalized(false)
+    setFinalizedDashboard(null)
+    setActiveEditor(null)
+    setOpenChartMenuId('')
+    setIsBuilderOpen(false)
+    setDraggingChartId('')
+    setDashboardError('')
+  }
+
+  function addCanvasVisual(type) {
+    const visual = createCanvasVisual(type, canvasVisuals.length)
+    setCanvasVisuals((previous) => [...previous, visual])
+    setSelectedCanvasVisualId(visual.id)
+  }
+
+  function removeCanvasVisual(visualId) {
+    setCanvasVisuals((previous) => previous.filter((visual) => visual.id !== visualId))
+    setSelectedCanvasVisualId((current) => (current === visualId ? '' : current))
+  }
+
+  function updateCanvasVisual(visualId, updater) {
+    setCanvasVisuals((previous) =>
+      previous.map((visual) => {
+        if (visual.id !== visualId) {
+          return visual
+        }
+
+        return typeof updater === 'function' ? updater(visual) : { ...visual, ...updater }
+      }),
+    )
+  }
+
+  function updateCanvasField(visualId, field, value, removeValue = false, multiple = false) {
+    updateCanvasVisual(visualId, (visual) => {
+      const isArrayField = multiple || ['values', 'tooltip', 'filters'].includes(field)
+
+      if (isArrayField) {
+        const currentValues = visual.fields?.[field] ?? []
+        const nextValues = removeValue
+          ? currentValues.filter((fieldName) => fieldName !== value)
+          : multiple
+            ? [...new Set([...currentValues, value])]
+            : value
+              ? [value]
+              : []
+        const nextVisual = {
+          ...visual,
+          fields: {
+            ...visual.fields,
+            [field]: nextValues,
+          },
+        }
+
+        if (!nextVisual.settings?.titleTouched) {
+          nextVisual.settings = {
+            ...nextVisual.settings,
+            title: getCanvasVisualTitle(nextVisual),
+          }
+        }
+
+        return nextVisual
+      }
+
+      const nextVisual = {
+        ...visual,
+        fields: {
+          ...visual.fields,
+          [field]: value,
+        },
+      }
+
+      if (!nextVisual.settings?.titleTouched) {
+        nextVisual.settings = {
+          ...nextVisual.settings,
+          title: getCanvasVisualTitle(nextVisual),
+        }
+      }
+
+      return nextVisual
+    })
+  }
+
+  function updateCanvasSetting(visualId, field, value) {
+    updateCanvasVisual(visualId, (visual) => {
+      const nextVisual = {
+        ...visual,
+        type: field === 'chart_type' ? value : visual.type,
+        settings: {
+          ...visual.settings,
+          [field]: value,
+          titleTouched: field === 'title' ? true : visual.settings?.titleTouched,
+        },
+      }
+
+      if (field !== 'title' && !nextVisual.settings?.titleTouched) {
+        nextVisual.settings = {
+          ...nextVisual.settings,
+          title: getCanvasVisualTitle(nextVisual),
+        }
+      }
+
+      return nextVisual
+    })
+  }
+
+  function updateCanvasContent(visualId, value) {
+    updateCanvasVisual(visualId, { content: value })
+  }
+
+  function startCanvasVisualDrag(event, visual) {
+    if (isFinalized) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedCanvasVisualId(visual.id)
+    setCanvasInteraction({
+      mode: 'move',
+      id: visual.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: visual.x,
+      startY: visual.y,
+    })
+  }
+
+  function startCanvasVisualResize(event, visual, direction) {
+    if (isFinalized) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedCanvasVisualId(visual.id)
+    setCanvasInteraction({
+      mode: direction,
+      id: visual.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startWidth: visual.width,
+      startHeight: visual.height,
+    })
+  }
+
+  function handleCanvasBackgroundClick(event) {
+    if (event.target === blankCanvasRef.current) {
+      setSelectedCanvasVisualId('')
+    }
+  }
+
+  function addCustomKpi() {
+    const customKpi = {
+      id: `custom-kpi-${Date.now()}`,
+      source: 'custom',
+      type: 'custom',
+      label: 'Custom KPI',
+      value: formatValue(summary.total_rows ?? tableRows.length),
+      hint: 'Custom metric',
+    }
+
+    setCustomKpis((previous) => [...previous, customKpi])
+    setHiddenKpiKeys((previous) => previous.filter((key) => key !== customKpi.id))
+    setActiveEditor({ type: 'kpi', textKey: customKpi.id })
+  }
+
+  function addCustomNote() {
+    const customNote = {
+      id: `note-${Date.now()}`,
+      title: 'New Note',
+      body: '',
+    }
+
+    setCustomNotes((previous) => [...previous, customNote])
+    setActiveEditor({ type: 'note', noteId: customNote.id })
+  }
+
   function removeChart(chartId) {
     setHiddenChartIds((previous) => (previous.includes(chartId) ? previous : [...previous, chartId]))
     setManualCharts((previous) => previous.filter((chart) => chart.id !== chartId))
@@ -1181,8 +2871,17 @@ function VisualizationPage() {
   }
 
   function removeKpi(textKey) {
+    if (textKey.startsWith('custom-kpi-')) {
+      setCustomKpis((previous) => previous.filter((kpi) => kpi.id !== textKey))
+    }
+
     setHiddenKpiKeys((previous) => (previous.includes(textKey) ? previous : [...previous, textKey]))
     setActiveEditor((current) => (current?.type === 'kpi' && current.textKey === textKey ? null : current))
+  }
+
+  function removeNote(noteId) {
+    setCustomNotes((previous) => previous.filter((note) => note.id !== noteId))
+    setActiveEditor((current) => (current?.type === 'note' && current.noteId === noteId ? null : current))
   }
 
   function moveChart(sourceId, targetId) {
@@ -1229,14 +2928,19 @@ function VisualizationPage() {
       datasetId,
       fileName,
       savedAt: new Date().toISOString(),
+      workspaceMode,
+      widgets: workspaceWidgets,
       kpis: visibleKpiCards,
       charts: visibleCharts,
+      notes: customNotes,
       chartOrder: visibleCharts.map((chart) => chart.id),
       settingsById,
       hiddenChartIds,
       hiddenKpiKeys,
       manualCharts,
+      customKpis,
       customChartsById,
+      canvasVisuals,
       filterState,
       filterMetadata,
       kpiTextByKey,
@@ -1263,9 +2967,16 @@ function VisualizationPage() {
     }
 
     setManualCharts(savedDashboard.manualCharts ?? [])
+    setCustomKpis(savedDashboard.customKpis ?? [])
+    setCustomNotes(savedDashboard.notes ?? [])
+    setCanvasVisuals(savedDashboard.canvasVisuals ?? [])
+    setSelectedCanvasVisualId(savedDashboard.canvasVisuals?.[0]?.id ?? '')
+    setHydratedCanvasDatasetId(datasetId)
     setCustomChartsById(savedDashboard.customChartsById ?? {})
     setHiddenChartIds(savedDashboard.hiddenChartIds ?? [])
     setHiddenKpiKeys(savedDashboard.hiddenKpiKeys ?? [])
+    setWorkspaceMode(savedDashboard.workspaceMode ?? 'suggested')
+    setWorkspaceWidgets(savedDashboard.widgets ?? DEFAULT_WORKSPACE_WIDGETS)
     setChartOrder(savedDashboard.chartOrder ?? savedDashboard.charts?.map((chart) => chart.id) ?? [])
     setSettingsById(savedDashboard.settingsById ?? {})
     setFilterState(savedDashboard.filterState ?? {})
@@ -1296,6 +3007,28 @@ function VisualizationPage() {
     })
   }
 
+  function updateChartDrivenFilter(column, rawValue) {
+    const filter = filterMetadataByColumn.get(column)
+    const nextFilterState = buildChartFilterState(filter, rawValue)
+
+    if (!filter || !nextFilterState) {
+      return
+    }
+
+    setFilterState((previous) => {
+      const currentFilterState = previous[column]
+      const next = { ...previous }
+
+      if (filterStatesMatch(filter, currentFilterState, nextFilterState)) {
+        delete next[column]
+      } else {
+        next[column] = nextFilterState
+      }
+
+      return next
+    })
+  }
+
   function clearAllFilters() {
     setFilterState({})
   }
@@ -1308,6 +3041,18 @@ function VisualizationPage() {
         [field]: value,
       },
     }))
+  }
+
+  function updateCustomKpiValue(textKey, value) {
+    setCustomKpis((previous) =>
+      previous.map((kpi) => (kpi.id === textKey ? { ...kpi, value } : kpi)),
+    )
+  }
+
+  function updateNote(noteId, field, value) {
+    setCustomNotes((previous) =>
+      previous.map((note) => (note.id === noteId ? { ...note, [field]: value } : note)),
+    )
   }
 
   function updateChartText(chartId, field, value) {
@@ -1457,47 +3202,55 @@ function VisualizationPage() {
             <>
               <button
                 type="button"
-                className="visual-secondary-button"
+                className="visual-secondary-button icon-only-button"
                 onClick={exportDashboardPng}
-                disabled={isExporting || presentationCharts.length === 0}
+                disabled={isExporting || presentationWidgetCount === 0}
+                title={isExporting ? 'Exporting' : 'Export PNG'}
+                aria-label={isExporting ? 'Exporting' : 'Export PNG'}
               >
-                {isExporting ? 'Exporting...' : 'Export PNG'}
+                <IconButtonContent icon="image" label={isExporting ? 'Exporting' : 'Export PNG'} />
               </button>
               <button
                 type="button"
-                className="visual-secondary-button"
+                className="visual-secondary-button icon-only-button"
                 onClick={exportDashboardPdf}
-                disabled={isExporting || presentationCharts.length === 0}
+                disabled={isExporting || presentationWidgetCount === 0}
+                title="Export PDF"
+                aria-label="Export PDF"
               >
-                Export PDF
+                <IconButtonContent icon="pdf" label="Export PDF" />
               </button>
-              <button type="button" className="visual-secondary-button" onClick={returnToEditMode}>
-                Back to Edit Mode
+              <button type="button" className="visual-secondary-button icon-only-button" onClick={returnToEditMode} title="Back to edit mode" aria-label="Back to edit mode">
+                <IconButtonContent icon="back" label="Back to edit mode" />
               </button>
             </>
           ) : (
             <>
               <button
                 type="button"
-                className="visual-apply-button"
+                className="visual-apply-button icon-only-button"
                 onClick={finalizeDashboard}
-                disabled={visibleCharts.length === 0}
+                disabled={workspaceWidgetCount === 0}
+                title="Finalize dashboard"
+                aria-label="Finalize dashboard"
               >
-                Finalize Dashboard
+                <IconButtonContent icon="save" label="Finalize dashboard" />
               </button>
-              <button type="button" className="visual-secondary-button" onClick={loadSavedDashboard}>
-                Load Saved
+              <button type="button" className="visual-secondary-button icon-only-button" onClick={loadSavedDashboard} title="Load saved" aria-label="Load saved">
+                <IconButtonContent icon="load" label="Load saved" />
               </button>
               <button
                 type="button"
-                className="visual-secondary-button"
+                className="visual-secondary-button icon-only-button"
                 onClick={regenerateDashboard}
                 disabled={isLoading || !hasDatasetPayload}
+                title={isLoading ? 'Generating' : 'Regenerate'}
+                aria-label={isLoading ? 'Generating' : 'Regenerate'}
               >
-                {isLoading ? 'Generating...' : 'Regenerate'}
+                <IconButtonContent icon="reset" label={isLoading ? 'Generating' : 'Regenerate'} />
               </button>
-              <Link to="/cleaning" className="visual-secondary-button">
-                Back to Clean
+              <Link to="/cleaning" className="visual-secondary-button icon-only-button" title="Back to clean" aria-label="Back to clean">
+                <IconButtonContent icon="back" label="Back to clean" />
               </Link>
             </>
           )}
@@ -1509,34 +3262,90 @@ function VisualizationPage() {
       ) : null}
 
       {!isFinalized ? (
-        <GlobalFilterPanel
-          filters={filterMetadata}
-          filterState={filterState}
+        <WorkspaceControlPanel
+          mode={workspaceMode}
+          widgetCount={workspaceWidgetCount}
+          isLoading={isLoading}
+          showWidgetBar={workspaceMode !== 'blank'}
+          onBlankWorkspace={createBlankWorkspace}
+          onSuggestedWorkspace={restoreSuggestedWorkspace}
+          onAddChart={() => setIsBuilderOpen(true)}
+          onAddKpi={addCustomKpi}
+          onAddNote={addCustomNote}
+        />
+      ) : null}
+
+      {hasDatasetPayload && filterMetadata.length ? (
+        <ActiveFilterChips
           activeFilters={activeFilters}
           disabled={isFiltering}
-          onFilterChange={updateGlobalFilter}
+          onRemoveFilter={(column) => updateGlobalFilter(column, {})}
           onClearFilters={clearAllFilters}
         />
       ) : null}
 
+      {workspaceMode === 'blank' ? (
+        <BlankCanvasBuilder
+          captureRef={dashboardCaptureRef}
+          canvasRef={blankCanvasRef}
+          visuals={canvasVisuals}
+          selectedVisualId={selectedCanvasVisualId}
+          isFinalized={isFinalized}
+          rows={tableRows}
+          columns={tableColumns}
+          columnProfiles={columnProfiles}
+          filterMetadataByColumn={filterMetadataByColumn}
+          filterState={filterState}
+          onSelectVisual={setSelectedCanvasVisualId}
+          onAddVisual={addCanvasVisual}
+          onRemoveVisual={removeCanvasVisual}
+          onUpdateField={updateCanvasField}
+          onUpdateSetting={updateCanvasSetting}
+          onUpdateContent={updateCanvasContent}
+          onDragStart={startCanvasVisualDrag}
+          onResizeStart={startCanvasVisualResize}
+          onCanvasBackgroundClick={handleCanvasBackgroundClick}
+          onChartValueSelect={updateChartDrivenFilter}
+        />
+      ) : (
       <div ref={dashboardCaptureRef} className="visual-dashboard-capture">
-        <section className="visual-kpi-grid">
-          {presentationKpis.map((kpi, index) => (
-            <KpiCard
-              key={`${kpi.label}-${index}`}
-              label={kpi.label}
-              value={kpi.value}
-              hint={kpi.hint}
-              textKey={getKpiTextKey(kpi, index)}
-              textOverride={presentationKpiText[getKpiTextKey(kpi, index)]}
-              isFinalized={isFinalized}
-              onEditText={(textKey, selectedKpi) =>
-                setActiveEditor({ type: 'kpi', textKey, kpi: selectedKpi })
-              }
-              onRemove={removeKpi}
-            />
-          ))}
-        </section>
+        {presentationKpis.length > 0 ? (
+          <section className="visual-kpi-grid">
+            {presentationKpis.map((kpi, index) => {
+              const textKey = getKpiInstanceKey(kpi, index)
+
+              return (
+                <KpiCard
+                  key={textKey}
+                  label={kpi.label}
+                  value={kpi.value}
+                  hint={kpi.hint}
+                  textKey={textKey}
+                  textOverride={presentationKpiText[textKey]}
+                  isFinalized={isFinalized}
+                  onEditText={(selectedTextKey) =>
+                    setActiveEditor({ type: 'kpi', textKey: selectedTextKey })
+                  }
+                  onRemove={removeKpi}
+                />
+              )
+            })}
+          </section>
+        ) : null}
+
+        {presentationNotes.length > 0 ? (
+          <section className="visual-note-grid">
+            {presentationNotes.map((note) => (
+              <NoteCard
+                key={note.id}
+                note={note}
+                isFinalized={isFinalized}
+                onEdit={() => setActiveEditor({ type: 'note', noteId: note.id })}
+                onRemove={() => removeNote(note.id)}
+              />
+            ))}
+          </section>
+        ) : null}
 
         <main className="visual-dashboard-body">
           <section className="visual-chart-section">
@@ -1576,13 +3385,16 @@ function VisualizationPage() {
                     onDrop={(event) => handleDrop(chart.id, event)}
                     onDragEnd={() => setDraggingChartId('')}
                     textOverride={presentationChartText[chart.id]}
+                    filterMetadataByColumn={filterMetadataByColumn}
+                    filterState={filterState}
+                    onChartValueSelect={updateChartDrivenFilter}
                   />
                 ))}
               </div>
             ) : (
               <div className="visual-empty-panel">
                 <h3>No visible charts</h3>
-                <p>Add a chart from the manual builder or regenerate the dashboard.</p>
+                <p>{workspaceMode === 'blank' ? 'Blank sheet' : 'Suggested dashboard is empty'}</p>
               </div>
             )}
           </section>
@@ -1600,15 +3412,16 @@ function VisualizationPage() {
             />
           ) : null}
 
-          {!isFinalized ? <FilteredDataTable columns={tableColumns} rows={tableRows} /> : null}
         </main>
       </div>
+      )}
 
-      {!isFinalized ? (
+      {!isFinalized && workspaceMode !== 'blank' ? (
         <DashboardEditorPanel
           editor={activeEditor}
           chart={activeChart}
-          kpi={activeEditor?.type === 'kpi' ? activeEditor.kpi : null}
+          kpi={activeKpi}
+          note={activeNote}
           columns={tableColumns}
           numericColumns={numericColumns}
           settings={activeChartSettings ?? effectiveManualSettings}
@@ -1620,6 +3433,8 @@ function VisualizationPage() {
           onApplyChart={applyCustomization}
           onChartTextChange={updateChartText}
           onKpiTextChange={updateKpiText}
+          onCustomKpiValueChange={updateCustomKpiValue}
+          onNoteChange={updateNote}
         />
       ) : null}
     </div>

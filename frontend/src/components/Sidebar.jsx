@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { AtlasLogo } from './AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 
 const LINKS = [
@@ -24,7 +25,7 @@ function Sidebar() {
   return (
     <aside className="app-sidebar">
       <div className="sidebar-panel sidebar-brand-panel">
-        <div className="brand-badge">A</div>
+        <AtlasLogo compact />
         <div>
           <p className="sidebar-eyebrow">ATLAS Workspace</p>
           <h1 className="sidebar-title">Data Cleaning and Analytics</h1>

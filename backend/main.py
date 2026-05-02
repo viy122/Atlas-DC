@@ -49,6 +49,10 @@ class DatasetUpdatePayload(BaseModel):
     rows: list[dict[str, object]] = Field(default_factory=list)
 
 
+class DatasetRenamePayload(BaseModel):
+    filename: str = Field(min_length=1, max_length=180)
+
+
 class VisualizationOverridePayload(BaseModel):
     chart_type: str | None = None
     x_axis: str | None = None
@@ -264,6 +268,15 @@ def _safe_export_filename(filename: object, suffix: str) -> str:
     return f"{safe_stem}_{suffix}.csv"
 
 
+def _safe_display_filename(filename: object) -> str:
+    name = str(filename or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r"[\r\n\t]+", " ", name).strip()
+    name = re.sub(r"[<>:\"/\\|?*]+", "_", name).strip(" ._")
+    if not name:
+        raise HTTPException(status_code=400, detail="Filename cannot be empty")
+    return name[:180]
+
+
 def _build_full_dataset(df: pd.DataFrame) -> dict[str, object]:
     full_df = _get_user_visible_dataframe(df)
     full_df = full_df.where(pd.notna(full_df), None)
@@ -299,8 +312,10 @@ def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object
         }
 
         if pd.api.types.is_numeric_dtype(series):
+            non_null_series = series.dropna()
             stats = {
                 "count": non_null_values,
+                "sum": _round_or_none(non_null_series.sum()) if non_null_values else None,
                 "mean": _round_or_none(series.mean()),
                 "median": _round_or_none(series.median()),
                 "min": _round_or_none(series.min()),
@@ -972,9 +987,11 @@ def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
     numeric_summary: list[dict[str, object]] = []
     for column in numeric_columns:
         series = df[column]
+        non_null_series = series.dropna()
         numeric_summary.append(
             {
                 "column": column,
+                "sum": _round_or_none(non_null_series.sum()) if not non_null_series.empty else None,
                 "mean": _round_or_none(series.mean()),
                 "median": _round_or_none(series.median()),
                 "min": _round_or_none(series.min()),
@@ -1023,14 +1040,22 @@ def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
 
 
 APEX_CHART_COLORS = [
-    "#36d399",
-    "#60a5fa",
-    "#fbbf24",
-    "#f472b6",
-    "#a78bfa",
-    "#2dd4bf",
-    "#fb7185",
-    "#c4b5fd",
+    "#0f766e",
+    "#2563eb",
+    "#f59e0b",
+    "#dc2626",
+    "#7c3aed",
+    "#0891b2",
+    "#16a34a",
+    "#db2777",
+    "#9333ea",
+    "#ea580c",
+    "#0284c7",
+    "#65a30d",
+    "#be123c",
+    "#4f46e5",
+    "#ca8a04",
+    "#059669",
 ]
 VALID_VISUAL_CHART_TYPES = {"bar", "line", "area", "pie", "donut", "scatter", "histogram"}
 BOOLEAN_TRUE_VALUES = {"true", "yes", "y", "1", "active", "enabled", "valid"}
@@ -1169,7 +1194,7 @@ def _build_filter_metadata(
             )
             continue
 
-        if inferred_type in {"categorical", "boolean"}:
+        if inferred_type in {"categorical", "boolean", "text"}:
             values = df[column].dropna().map(_format_chart_label)
             options = values.value_counts().head(80)
             filters.append(
@@ -2805,6 +2830,18 @@ def get_dataset_state(
         if has_cleaned
         else None,
         "cleaning_summary": _json_safe(dataset.get("cleaning_summary")),
+    }
+
+
+@app.patch("/datasets/{dataset_id}/filename")
+def rename_dataset(dataset_id: str, payload: DatasetRenamePayload) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    filename = _safe_display_filename(payload.filename)
+    dataset["filename"] = filename
+
+    return {
+        "dataset_id": dataset_id,
+        "filename": filename,
     }
 
 

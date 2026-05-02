@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
+import { IconButtonContent } from '../components/AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
-import { formatDataType, formatPercent, totalMissing } from '../utils/formatters'
+import { formatDataType, formatPercent, formatValue, totalMissing } from '../utils/formatters'
 
 function ProfileMetric({ label, value, hint }) {
   return (
@@ -61,11 +62,11 @@ function ProfilingPage() {
         </div>
 
         <div className="profile-toolbar__actions">
-          <Link to="/dataset" className="ghost-button">
-            Back to Upload
+          <Link to="/dataset" className="ghost-button icon-only-button" title="Back to upload" aria-label="Back to upload">
+            <IconButtonContent icon="back" label="Back to upload" />
           </Link>
-          <Link to="/cleaning" className="primary-button">
-            Continue to Clean
+          <Link to="/cleaning" className="primary-button icon-only-button" title="Continue to clean" aria-label="Continue to clean">
+            <IconButtonContent icon="clean" label="Continue to clean" />
           </Link>
         </div>
       </header>
@@ -168,11 +169,24 @@ function ProfilingPage() {
                 {rawProfile.basic_statistics.slice(0, 5).map((stat) => (
                   <article key={`stat-${stat.column}`}>
                     <strong>{stat.column}</strong>
-                    <span>Mean {stat.mean ?? '-'}</span>
-                    <span>Median {stat.median ?? '-'}</span>
-                    <span>
-                      Range {stat.min ?? '-'} - {stat.max ?? '-'}
-                    </span>
+                    <div className="profile-stat-metrics">
+                      <span>
+                        <em>Sum</em>
+                        {formatValue(stat.sum)}
+                      </span>
+                      <span>
+                        <em>Average</em>
+                        {formatValue(stat.mean)}
+                      </span>
+                      <span>
+                        <em>Middle</em>
+                        {formatValue(stat.median)}
+                      </span>
+                      <span>
+                        <em>Range</em>
+                        {formatValue(stat.min)} to {formatValue(stat.max)}
+                      </span>
+                    </div>
                   </article>
                 ))}
               </div>

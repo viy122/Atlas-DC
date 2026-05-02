@@ -1,19 +1,10 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { IconButtonContent } from '../components/AtlasBrand'
 import ComparisonTable from '../components/ComparisonTable'
 import { useAtlas } from '../context/AtlasContext'
 import { buildCleaningRecommendations, buildQualityReport } from '../utils/dataQuality'
-import { formatPercent, totalMissing } from '../utils/formatters'
-
-const CLEANING_RULES = [
-  'Normalize placeholder nulls',
-  'Drop rows missing critical IDs/emails',
-  'Flag required-field gaps',
-  'Fill numeric gaps only by mean/median',
-  'Preserve unknown text as null',
-  'Flag duplicate primary keys',
-  'Validate emails, ranges, and dates',
-]
+import { formatPercent } from '../utils/formatters'
 
 const DEFAULT_CLEANING_OPTIONS = {
   normalize_placeholder_nulls: true,
@@ -138,8 +129,15 @@ function SmartRecommendationPanel({ recommendations, onApply }) {
           <h2>Suggested cleaning plan</h2>
           <p>ATLAS reads the profile and flags the cleaning rules most likely to improve this dataset.</p>
         </div>
-        <button type="button" className="primary-button" onClick={onApply} disabled={recommendations.length === 0}>
-          Apply Recommendations
+        <button
+          type="button"
+          className="primary-button icon-only-button"
+          onClick={onApply}
+          disabled={recommendations.length === 0}
+          title="Apply recommendations"
+          aria-label="Apply recommendations"
+        >
+          <IconButtonContent icon="spark" label="Apply recommendations" />
         </button>
       </div>
 
@@ -190,7 +188,6 @@ function QualityScoreCard({ title, report, muted = false }) {
 }
 
 function CleaningPage() {
-  const [activeTab, setActiveTab] = useState('audit')
   const [cleaningOptions, setCleaningOptions] = useState(DEFAULT_CLEANING_OPTIONS)
   const [criticalKeywordsText, setCriticalKeywordsText] = useState('id,email')
   const [requiredKeywordsText, setRequiredKeywordsText] = useState('')
@@ -258,11 +255,6 @@ function CleaningPage() {
   const flaggedRows = cleaningSummary?.flagged_rows ?? auditLog.flagged_rows ?? {}
   const filledNumeric = cleaningSummary?.filled_numeric_values ?? auditLog.filled_numeric_values ?? {}
   const filledText = cleaningSummary?.filled_text_values ?? auditLog.filled_text_values ?? {}
-  const validationErrors = cleaningSummary?.validation_errors ?? []
-  const convertedColumns = cleaningSummary?.converted_columns ?? []
-  const cleaningSteps = cleaningSummary?.cleaning_steps ?? auditLog.cleaning_steps ?? []
-  const rawMissingTotal = totalMissing(rawProfile.column_profiles ?? [])
-  const cleanedMissingTotal = totalMissing(cleanedProfile?.column_profiles ?? [])
   const hasCleaned = Boolean(cleanedProfile)
   const rawRowsForScoring = hasCleaned ? [] : uploadedDataset.rows
   const cleanedRowsForScoring = hasCleaned ? uploadedDataset.rows : []
@@ -271,6 +263,11 @@ function CleaningPage() {
   })
   const cleanedQualityReport = buildQualityReport(cleanedProfile ?? rawProfile, cleanedRowsForScoring)
   const recommendationReport = buildCleaningRecommendations(rawProfile, rawRowsForScoring)
+  const todayLabel = new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(new Date())
 
   function applySmartRecommendations() {
     setCleaningOptions((currentOptions) => ({
@@ -291,31 +288,41 @@ function CleaningPage() {
         </div>
 
         <div className="cleaning-toolbar__actions">
-          <Link to="/profiling" className="ghost-button">
-            Back to Profile
+          <Link to="/profiling" className="ghost-button icon-only-button" title="Back to profile" aria-label="Back to profile">
+            <IconButtonContent icon="back" label="Back to profile" />
           </Link>
           <button
             type="button"
-            className="primary-button"
-            onClick={handleRunCleaning}
-            disabled={busyAction === 'cleaning'}
-          >
-            {busyAction === 'cleaning' ? 'Cleaning...' : hasCleaned ? 'Run Again' : 'Run Cleaning'}
-          </button>
-          <button
-            type="button"
-            className="ghost-button"
+            className="ghost-button icon-only-button"
             onClick={() => downloadDataset({ stage: 'cleaned' })}
             disabled={!hasCleaned || busyAction === 'exporting'}
+            title={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'}
+            aria-label={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'}
           >
-            {busyAction === 'exporting' ? 'Exporting...' : 'Download Cleaned CSV'}
+            <IconButtonContent icon="download" label={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'} />
           </button>
-          <Link to="/analysis" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'}>
-            Analyze
+          <Link to="/analysis" className={hasCleaned ? 'ghost-button icon-only-button' : 'ghost-button icon-only-button disabled-link'} title="Analyze" aria-label="Analyze">
+            <IconButtonContent icon="analyze" label="Analyze" />
           </Link>
-          <Link to="/visualization" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'}>
-            Visualize
+          <Link to="/visualization" className={hasCleaned ? 'ghost-button icon-only-button' : 'ghost-button icon-only-button disabled-link'} title="Visualize" aria-label="Visualize">
+            <IconButtonContent icon="visualize" label="Visualize" />
           </Link>
+        </div>
+
+        <div className="cleaning-toolbar__right">
+          <span className="cleaning-toolbar__date">
+            <IconButtonContent icon="calendar" label={todayLabel} showLabel />
+          </span>
+          <button
+            type="button"
+            className="primary-button icon-only-button"
+            onClick={handleRunCleaning}
+            disabled={busyAction === 'cleaning'}
+            title={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Clean all again' : 'Clean all'}
+            aria-label={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Clean all again' : 'Clean all'}
+          >
+            <IconButtonContent icon="spark" label={busyAction === 'cleaning' ? 'Cleaning' : 'Clean all'} />
+          </button>
         </div>
       </header>
 
@@ -332,8 +339,8 @@ function CleaningPage() {
             <h2>Cleaning Controls</h2>
             <p>Select the rules to apply, then run the cleaning pipeline.</p>
           </div>
-          <button type="button" className="ghost-button" onClick={resetCleaningOptions}>
-            Reset Rules
+          <button type="button" className="ghost-button icon-only-button" onClick={resetCleaningOptions} title="Reset rules" aria-label="Reset rules">
+            <IconButtonContent icon="reset" label="Reset rules" />
           </button>
         </div>
 
@@ -402,167 +409,17 @@ function CleaningPage() {
         <div className="cleaning-tabs" role="tablist" aria-label="Cleaning views">
           <button
             type="button"
-            className={activeTab === 'audit' ? 'cleaning-tab cleaning-tab--active' : 'cleaning-tab'}
-            onClick={() => setActiveTab('audit')}
+            className="cleaning-tab cleaning-tab--active"
             role="tab"
-            aria-selected={activeTab === 'audit'}
-          >
-            Cleaning Audit
-          </button>
-          <button
-            type="button"
-            className={activeTab === 'compare' ? 'cleaning-tab cleaning-tab--active' : 'cleaning-tab'}
-            onClick={() => setActiveTab('compare')}
-            role="tab"
-            aria-selected={activeTab === 'compare'}
+            aria-selected="true"
           >
             Original vs Cleaned Dataset
           </button>
         </div>
 
-        {activeTab === 'audit' ? (
-          <section className="cleaning-layout">
-            <main className="cleaning-audit-panel">
-              <div className="cleaning-panel-head">
-                <div>
-                  <h2>Cleaning Audit</h2>
-                  <p>{cleaningSummary?.data_integrity_policy ?? 'Unknown human-entered values are preserved as null and flagged instead of guessed.'}</p>
-                </div>
-              </div>
-
-              <div className="cleaning-audit-grid">
-                <article>
-                  <span>Missing Before</span>
-                  <strong>{rawMissingTotal}</strong>
-                </article>
-                <article>
-                  <span>Missing After</span>
-                  <strong>{hasCleaned ? cleanedMissingTotal : '-'}</strong>
-                </article>
-                <article>
-                  <span>Rows Before</span>
-                  <strong>{cleaningSummary?.rows_before ?? rawProfile.rows}</strong>
-                </article>
-                <article>
-                  <span>Rows After</span>
-                  <strong>{cleaningSummary?.rows_after ?? '-'}</strong>
-                </article>
-              </div>
-
-              <div className="cleaning-rule-list">
-                {CLEANING_RULES.map((rule) => (
-                  <span key={rule}>{rule}</span>
-                ))}
-              </div>
-
-              <div className="cleaning-decision-list">
-                {cleaningSteps.length > 0 ? (
-                  cleaningSteps.map((step) => (
-                    <article
-                      key={step.name}
-                      className={
-                        step.enabled
-                          ? 'cleaning-decision-item'
-                          : 'cleaning-decision-item cleaning-decision-item--disabled'
-                      }
-                    >
-                      <div>
-                        <strong>{step.name}</strong>
-                        <span>{step.rationale}</span>
-                      </div>
-                      <em>{step.impact_count ?? 0}</em>
-                      <small>{step.handling}</small>
-                    </article>
-                  ))
-                ) : (
-                  <p className="empty-state-inline">Run cleaning to generate the rule-by-rule decision log.</p>
-                )}
-              </div>
-
-              <div className="cleaning-audit-table-wrap">
-                <table className="cleaning-audit-table">
-                  <thead>
-                    <tr>
-                      <th>Audit Item</th>
-                      <th>Result</th>
-                      <th>Handling</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>Critical missing rows</td>
-                      <td>{rowsDropped.critical_missing ?? 0}</td>
-                      <td>Dropped</td>
-                    </tr>
-                    <tr>
-                      <td>All-null rows</td>
-                      <td>{rowsDropped.all_null ?? 0}</td>
-                      <td>Dropped</td>
-                    </tr>
-                    <tr>
-                      <td>Required field gaps</td>
-                      <td>{flaggedRows.missing_required ?? 0}</td>
-                      <td>Flagged and kept</td>
-                    </tr>
-                    <tr>
-                      <td>Duplicate primary keys</td>
-                      <td>{flaggedRows.duplicate_primary_key ?? 0}</td>
-                      <td>Flagged, not deleted</td>
-                    </tr>
-                    <tr>
-                      <td>Validation issues</td>
-                      <td>{flaggedRows.validation ?? 0}</td>
-                      <td>Flagged or nullified</td>
-                    </tr>
-                    <tr>
-                      <td>Converted columns</td>
-                      <td>{convertedColumns.length}</td>
-                      <td>Datetime/numeric coercion</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </main>
-
-            <aside className="cleaning-side-panel">
-              <section>
-                <h3>Converted Columns</h3>
-                {convertedColumns.length > 0 ? (
-                  <div className="cleaning-chip-list">
-                    {convertedColumns.map((column) => (
-                      <span key={`${column.column}-${column.to_type}`}>
-                        {column.column} to {column.to_type}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty-state-inline">No conversions yet.</p>
-                )}
-              </section>
-
-              <section>
-                <h3>Validation Errors</h3>
-                {validationErrors.length > 0 ? (
-                  <div className="cleaning-error-list">
-                    {validationErrors.map((error, index) => (
-                      <article key={`${error.column}-${error.issue}-${index}`}>
-                        <strong>{error.column}</strong>
-                        <span>{error.issue}</span>
-                        <small>{error.rows} rows</small>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty-state-inline">No validation errors logged.</p>
-                )}
-              </section>
-            </aside>
-          </section>
-        ) : (
-          <section className="cleaning-comparison-area">
-            <ComparisonTable comparison={comparison} />
-          </section>
-        )}
+        <section className="cleaning-comparison-area">
+          <ComparisonTable comparison={comparison} />
+        </section>
       </section>
     </div>
   )

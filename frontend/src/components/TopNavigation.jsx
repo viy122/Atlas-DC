@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom'
+import { AtlasLogo } from './AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 
 const LINKS = [
@@ -19,7 +20,8 @@ function TopNavigation() {
     <header className="top-nav">
       <div className="top-nav__inner">
         <NavLink to="/" className="top-nav__brand">
-          ATLAS
+          <AtlasLogo compact />
+          <span className="top-nav__brand-name">ATLAS</span>
         </NavLink>
 
         {!isWelcomePage ? (

@@ -60,6 +60,28 @@ function getCorrelationPairs(correlationMatrix = []) {
   return pairs.sort((left, right) => Math.abs(right.score) - Math.abs(left.score))
 }
 
+function describeCorrelation(score) {
+  const absoluteScore = Math.abs(Number(score) || 0)
+  const strength = absoluteScore >= 0.75 ? 'strong' : absoluteScore >= 0.45 ? 'moderate' : 'light'
+  const direction = score >= 0 ? 'positive' : 'negative'
+
+  return `${strength} ${direction}`
+}
+
+function describeChange(before, after, label) {
+  const beforeValue = Number(before ?? 0)
+  const afterValue = Number(after ?? 0)
+  const difference = afterValue - beforeValue
+
+  if (difference === 0) {
+    return `${label} stayed at ${formatValue(afterValue)}.`
+  }
+
+  return `${label} ${difference > 0 ? 'increased' : 'decreased'} by ${formatValue(
+    Math.abs(difference),
+  )}, from ${formatValue(beforeValue)} to ${formatValue(afterValue)}.`
+}
+
 function AnalysisMetric({ label, value, hint }) {
   return (
     <article className="analysis-metric">
@@ -137,8 +159,10 @@ function AnalysisPage() {
   ]
 
   const executiveSummary = strongestCorrelation
-    ? `ATLAS found the strongest relationship between ${strongestCorrelation.source} and ${strongestCorrelation.target}, with a correlation score of ${strongestCorrelation.score.toFixed(2)}.`
-    : 'ATLAS is ready to interpret the dataset, but stronger relationships will appear once more numeric measures are available.'
+    ? `${strongestCorrelation.source} and ${strongestCorrelation.target} move together with a ${describeCorrelation(
+        strongestCorrelation.score,
+      )} relationship.`
+    : 'ATLAS can interpret the dataset, but stronger relationship notes need at least two useful numeric measures.'
 
   return (
     <div className="page-grid">
@@ -165,8 +189,8 @@ function AnalysisPage() {
           <p className="insight-summary-card__body">
             {executiveSummary}{' '}
             {bestCategory
-              ? `${bestCategory.label} is the most frequent value in ${topFrequencies[0]?.column}, making it the dominant categorical segment in the current dataset.`
-              : 'Frequent-value analysis will appear once categorical groups are available.'}{' '}
+              ? `${bestCategory.label} is the dominant segment in ${topFrequencies[0]?.column}.`
+              : 'No dominant category is available yet.'}{' '}
             {missingTotal > 0
               ? `Data quality still shows ${formatValue(missingTotal)} missing cells, so interpretation should be read with that context in mind.`
               : 'No major data quality gaps remain after cleaning.'}
@@ -233,19 +257,6 @@ function AnalysisPage() {
         />
 
         <InsightCard
-          title="Most Frequent Values"
-          tone="default"
-          body={
-            bestCategory
-              ? `${bestCategory.label} is currently the most frequent value in ${topFrequencies[0]?.column}, with a count of ${formatValue(
-                  bestCategory.count,
-                )}.`
-              : 'Frequent-value insights will appear when categorical groups are detected.'
-          }
-          action="Inspect Categories"
-        />
-
-        <InsightCard
           title="Trends or Patterns"
           tone="accent"
           body={
@@ -288,48 +299,6 @@ function AnalysisPage() {
       </section>
 
       <section className="analysis-detail-grid">
-        <article className="surface-card analysis-panel analysis-panel--wide">
-          <div className="card-header">
-            <div>
-              <h2>Numeric Summary</h2>
-              <p>Mean, median, range, and spread for measurable columns.</p>
-            </div>
-          </div>
-
-          {numericSummary.length > 0 ? (
-            <div className="analysis-table-wrap">
-              <table className="analysis-table">
-                <thead>
-                  <tr>
-                    <th>Column</th>
-                    <th>Mean</th>
-                    <th>Median</th>
-                    <th>Min</th>
-                    <th>Max</th>
-                    <th>Std Dev</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {numericSummary.map((stat) => (
-                    <tr key={`numeric-${stat.column}`}>
-                      <td>
-                        <strong>{stat.column}</strong>
-                      </td>
-                      <td>{formatValue(stat.mean)}</td>
-                      <td>{formatValue(stat.median)}</td>
-                      <td>{formatValue(stat.min)}</td>
-                      <td>{formatValue(stat.max)}</td>
-                      <td>{formatValue(stat.std)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="empty-state-inline">No numeric columns are available for summary statistics.</p>
-          )}
-        </article>
-
         <article className="surface-card analysis-panel">
           <div className="card-header">
             <div>
@@ -349,23 +318,31 @@ function AnalysisPage() {
           <div className="card-header">
             <div>
               <h2>Most Frequent Values</h2>
-              <p>Dominant categories found in the active dataset.</p>
+              <p>Plain-language category patterns from the active dataset.</p>
             </div>
           </div>
 
           {topFrequencies.length > 0 ? (
             <div className="frequency-column-list">
-              {topFrequencies.map((column) => (
-                <section key={`freq-${column.column}`} className="frequency-column">
-                  <h3>{column.column}</h3>
-                  {(column.values ?? []).slice(0, 5).map((item) => (
-                    <div key={`${column.column}-${item.label}`} className="frequency-row">
-                      <span>{item.label}</span>
-                      <strong>{formatValue(item.count)}</strong>
-                    </div>
-                  ))}
-                </section>
-              ))}
+              {topFrequencies.map((column) => {
+                const values = column.values ?? []
+                const topValue = values[0]
+                const otherValues = values.slice(1, 4).map((item) => item.label).join(', ')
+
+                return (
+                  <section key={`freq-${column.column}`} className="frequency-column">
+                    <h3>{column.column}</h3>
+                    <p>
+                      {topValue
+                        ? `${topValue.label} appears most often, showing up in ${formatValue(
+                            topValue.count,
+                          )} row(s).`
+                        : 'No clear top value was detected.'}
+                    </p>
+                    {otherValues ? <small>Other common values: {otherValues}</small> : null}
+                  </section>
+                )
+              })}
             </div>
           ) : (
             <p className="empty-state-inline">No categorical frequency output is available yet.</p>
@@ -376,16 +353,16 @@ function AnalysisPage() {
           <div className="card-header">
             <div>
               <h2>Correlation Check</h2>
-              <p>Top numeric relationships ranked by absolute score.</p>
+              <p>Readable relationship notes between numeric fields.</p>
             </div>
           </div>
 
           {correlationPairs.length > 0 ? (
             <div className="correlation-list">
-              {correlationPairs.slice(0, 6).map((pair) => (
+              {correlationPairs.slice(0, 4).map((pair) => (
                 <div key={`${pair.source}-${pair.target}`} className="correlation-row">
                   <span>
-                    {pair.source} / {pair.target}
+                    {pair.source} and {pair.target} have a {describeCorrelation(pair.score)} relationship.
                   </span>
                   <strong>{pair.score.toFixed(2)}</strong>
                 </div>
@@ -400,32 +377,35 @@ function AnalysisPage() {
           <div className="card-header">
             <div>
               <h2>Cleaning Impact</h2>
-              <p>How preprocessing affected this analysis stage.</p>
+              <p>What changed after preprocessing.</p>
             </div>
           </div>
 
           {cleaningSummary ? (
             <div className="analysis-impact-list">
               <div>
-                <span>Rows</span>
-                <strong>
-                  {formatValue(cleaningSummary.rows_before)} to {formatValue(cleaningSummary.rows_after)}
-                </strong>
+                <span>{describeChange(cleaningSummary.rows_before, cleaningSummary.rows_after, 'Rows')}</span>
               </div>
               <div>
-                <span>Missing Cells</span>
-                <strong>
-                  {formatValue(cleaningSummary.missing_values_before)} to{' '}
-                  {formatValue(cleaningSummary.missing_values_after)}
-                </strong>
+                <span>
+                  {describeChange(
+                    cleaningSummary.missing_values_before,
+                    cleaningSummary.missing_values_after,
+                    'Missing cells',
+                  )}
+                </span>
               </div>
               <div>
-                <span>Duplicates Removed</span>
-                <strong>{formatValue(cleaningSummary.duplicates_removed ?? 0)}</strong>
+                <span>
+                  {cleaningSummary.duplicates_removed
+                    ? `${formatValue(cleaningSummary.duplicates_removed)} duplicate row(s) were removed.`
+                    : 'No exact duplicate rows were removed.'}
+                </span>
               </div>
               <div>
-                <span>Rules Applied</span>
-                <strong>{cleaningSteps.filter((step) => step.enabled).length}</strong>
+                <span>
+                  {cleaningSteps.filter((step) => step.enabled).length} cleaning rule(s) contributed to the final dataset.
+                </span>
               </div>
             </div>
           ) : (
