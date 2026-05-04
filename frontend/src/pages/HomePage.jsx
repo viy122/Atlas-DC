@@ -30,23 +30,8 @@ const HOW_IT_WORKS = [
   ['Visualize', 'Build a chart sheet with filters, custom widgets, and export-ready dashboards.'],
 ]
 
-const TUTORIALS = [
-  {
-    title: 'First Dataset Walkthrough',
-    steps: 'Upload a file, save edits, profile columns, then run Clean All with the recommended rules.',
-  },
-  {
-    title: 'Quality Review Guide',
-    steps: 'Use Profile metrics and Cleaning comparison to verify what changed before presenting results.',
-  },
-  {
-    title: 'Dashboard Builder Guide',
-    steps: 'Open Visualize, choose chart types, apply filters, add notes or KPIs, then finalize the dashboard.',
-  },
-]
-
 function HomePage() {
-  const { workflow, fileName } = useAtlas()
+  const { workflow } = useAtlas()
 
   return (
     <div className="landing-page">
@@ -79,15 +64,6 @@ function HomePage() {
             connected flow so each step uses the same active dataset context.
           </p>
         </article>
-        <aside className="landing-workspace-card">
-          <span>Current Workspace</span>
-          <strong>{fileName || 'No dataset loaded'}</strong>
-          <div>
-            <em className={workflow.uploaded ? 'is-ready' : ''}>Uploaded</em>
-            <em className={workflow.cleaned ? 'is-ready' : ''}>Cleaned</em>
-            <em className={workflow.dashboardReady ? 'is-ready' : ''}>Dashboard</em>
-          </div>
-        </aside>
       </section>
 
       <section className="landing-section">
@@ -105,11 +81,11 @@ function HomePage() {
         </div>
       </section>
 
-      <section className="landing-section landing-section--band">
-        <div className="landing-section__head">
+      <details className="landing-disclosure">
+        <summary>
           <span>How It Works</span>
-          <h2>Follow the workflow, then export the result.</h2>
-        </div>
+          <strong>Workflow steps</strong>
+        </summary>
         <div className="landing-steps">
           {HOW_IT_WORKS.map(([title, body], index) => (
             <article key={title}>
@@ -119,22 +95,7 @@ function HomePage() {
             </article>
           ))}
         </div>
-      </section>
-
-      <section className="landing-section">
-        <div className="landing-section__head">
-          <span>Tutorials</span>
-          <h2>Quick walkthroughs for onboarding.</h2>
-        </div>
-        <div className="landing-tutorial-grid">
-          {TUTORIALS.map((tutorial) => (
-            <article key={tutorial.title}>
-              <h3>{tutorial.title}</h3>
-              <p>{tutorial.steps}</p>
-            </article>
-          ))}
-        </div>
-      </section>
+      </details>
 
       <section className="landing-cta">
         <div>

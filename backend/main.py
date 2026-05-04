@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
@@ -17,6 +18,34 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - keeps the app importable before deps are installed.
+    load_dotenv = None
+
+
+def _load_backend_env() -> None:
+    env_path = Path(__file__).with_name(".env")
+    if load_dotenv is not None:
+        load_dotenv(env_path, encoding="utf-8-sig")
+        return
+
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
+_load_backend_env()
 
 app = FastAPI(title="ATLAS Backend", version="1.1.0")
 
@@ -48,7 +77,8 @@ NULL_TEXT_TOKENS = {
     "unknown",
 }
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
+GEMINI_DEFAULT_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash-lite")
 AI_INSIGHTS_CACHE_VERSION = "polished-v2"
 GEMINI_INSIGHTS_RESPONSE_SCHEMA = {
     "type": "OBJECT",
@@ -77,6 +107,20 @@ GEMINI_INSIGHTS_RESPONSE_SCHEMA = {
         "simple_recommendations",
     ],
 }
+
+
+class GeminiAPIError(Exception):
+    def __init__(
+        self,
+        detail: str,
+        *,
+        provider_status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.provider_status_code = provider_status_code
+        self.retryable = retryable
 
 
 class DatasetUpdatePayload(BaseModel):
@@ -1239,6 +1283,46 @@ def _build_gemini_prompt(summary: dict[str, object]) -> str:
     )
 
 
+def _get_gemini_model_candidates(primary_model: str) -> list[str]:
+    raw_fallbacks = os.getenv("GEMINI_FALLBACK_MODELS") or ",".join(GEMINI_DEFAULT_FALLBACK_MODELS)
+    candidates = [primary_model, *(model.strip() for model in raw_fallbacks.split(","))]
+    unique_candidates: list[str] = []
+
+    for candidate in candidates:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    return unique_candidates or [GEMINI_DEFAULT_MODEL]
+
+
+def _extract_gemini_error_detail(status_code: int, response_body: str) -> str:
+    fallback = f"Gemini API returned HTTP {status_code}. Try again later."
+
+    try:
+        payload = json.loads(response_body)
+    except json.JSONDecodeError:
+        return fallback
+
+    if not isinstance(payload, dict):
+        return fallback
+
+    error_payload = payload.get("error")
+    if not isinstance(error_payload, dict):
+        return fallback
+
+    message = str(error_payload.get("message") or "").strip()
+    status = str(error_payload.get("status") or "").strip()
+    provider_code = error_payload.get("code") or status_code
+    prefix = f"Gemini API error {provider_code}"
+    if status:
+        prefix = f"{prefix} {status}"
+
+    if not message:
+        return f"{prefix}. Try again later."
+
+    return f"{prefix}: {message[:500]}"
+
+
 def _post_gemini_generate_content(
     model: str,
     api_key: str,
@@ -1258,14 +1342,16 @@ def _post_gemini_generate_content(
         with urllib.request.urlopen(request, timeout=35) as response:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Gemini could not generate insights right now. Try again later.",
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise GeminiAPIError(
+            _extract_gemini_error_detail(exc.code, response_body),
+            provider_status_code=exc.code,
+            retryable=exc.code in {429, 500, 502, 503, 504},
         ) from exc
     except (TimeoutError, OSError, urllib.error.URLError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Unable to reach Gemini API right now. Try again in a moment.",
+        raise GeminiAPIError(
+            "Unable to reach Gemini API right now. Try again in a moment.",
+            retryable=True,
         ) from exc
 
     try:
@@ -3334,14 +3420,15 @@ async def generate_dataset_ai_insights(
                 **cached_payload,
             }
 
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
+    api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not api_key or api_key == "your_gemini_api_key_here":
         raise HTTPException(
             status_code=503,
-            detail="Gemini API key is not configured on the backend. Set GEMINI_API_KEY and restart the server.",
+            detail="Gemini API key is not configured on the backend. Add GEMINI_API_KEY to backend/.env or set it in the server environment, then restart the server.",
         )
 
     model = (os.getenv("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL).strip() or GEMINI_DEFAULT_MODEL
+    model_candidates = _get_gemini_model_candidates(model)
     request_payload = {
         "contents": [
             {
@@ -3357,12 +3444,31 @@ async def generate_dataset_ai_insights(
         },
     }
 
-    response_payload = await asyncio.to_thread(
-        _post_gemini_generate_content,
-        model,
-        api_key,
-        request_payload,
-    )
+    last_gemini_error: GeminiAPIError | None = None
+    selected_model = model
+    response_payload: dict[str, object] | None = None
+
+    for candidate_model in model_candidates:
+        try:
+            response_payload = await asyncio.to_thread(
+                _post_gemini_generate_content,
+                candidate_model,
+                api_key,
+                request_payload,
+            )
+            selected_model = candidate_model
+            break
+        except GeminiAPIError as exc:
+            last_gemini_error = exc
+            if not exc.retryable:
+                break
+
+    if response_payload is None:
+        raise HTTPException(
+            status_code=502,
+            detail=last_gemini_error.detail if last_gemini_error else "Gemini could not generate insights right now. Try again later.",
+        )
+
     gemini_text = _extract_gemini_text(response_payload)
     insights = _normalize_gemini_insights(gemini_text)
     if not any(insights.values()):
@@ -3373,7 +3479,7 @@ async def generate_dataset_ai_insights(
 
     result = {
         "source": "gemini",
-        "model": model,
+        "model": selected_model,
         "summary_hash": cache_key,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "insights": insights,

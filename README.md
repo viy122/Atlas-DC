@@ -64,9 +64,19 @@ The Cleaning page also shows a decision log with the impact count, handling meth
 
 ```bash
 cd backend
+copy .env.example .env
 pip install -r requirements.txt
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+After copying `.env.example`, open `backend/.env` and replace `your_gemini_api_key_here` with your Gemini API key:
+
+```env
+GEMINI_API_KEY=your_actual_key_here
+```
+
+The backend loads `backend/.env` automatically when it starts. If you change the key while the server is already running, stop and start the backend again.
+The default Gemini model is `gemini-flash-latest`; you can override it with `GEMINI_MODEL` in `backend/.env`.
 
 ### Frontend
 

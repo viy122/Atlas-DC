@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
-import { formatBytes, formatDataType, formatDateTime, totalMissing } from '../utils/formatters'
+import { formatDataType } from '../utils/formatters'
 
 function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data', iconOnly = false }) {
   return (
@@ -58,7 +58,6 @@ function UploadPage() {
   const {
     datasetId,
     fileName,
-    datasetMeta,
     uploadedDataset,
     rawProfile,
     busyAction,
@@ -86,26 +85,6 @@ function UploadPage() {
     () => new Map((rawProfile?.column_profiles ?? []).map((column) => [column.name, column])),
     [rawProfile],
   )
-
-  const editorFormula = useMemo(() => {
-    if (!rawProfile?.column_profiles?.length) {
-      return '= Upload a CSV or Excel file to start editing.'
-    }
-
-    const typeMap = {
-      NUMBER: 'number',
-      STRING: 'text',
-      BOOLEAN: 'logical',
-      DATETIME: 'date',
-    }
-
-    const columnTypes = rawProfile.column_profiles
-      .slice(0, 8)
-      .map((column) => `{"${column.name}", type ${typeMap[formatDataType(column.dtype)] ?? 'text'}}`)
-      .join(', ')
-
-    return `= Table.TransformColumnTypes(#"Promoted Headers", {${columnTypes}})`
-  }, [rawProfile])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -259,17 +238,6 @@ function UploadPage() {
 
   return (
     <div className="upload-workbench">
-      <aside className="query-sidebar">
-        <div className="query-sidebar__head">
-          <span>Queries [1]</span>
-        </div>
-
-        <div className={hasDataset ? 'query-item query-item--active' : 'query-item'}>
-          <span className="query-table-icon" aria-hidden="true" />
-          <strong>{fileName || 'No dataset loaded'}</strong>
-        </div>
-      </aside>
-
       <section className="query-main">
         <div className="editor-toolbar upload-editor-toolbar">
           <div className="editor-toolbar__group">
@@ -312,11 +280,27 @@ function UploadPage() {
               <IconButtonContent icon="clean" label="Clean" />
             </Link>
           </div>
-        </div>
 
-        <div className="editor-formula-bar">
-          <span className="editor-formula-bar__fx">fx</span>
-          <div className="editor-formula-bar__input">{editorFormula}</div>
+          {hasDataset ? (
+            <form className="rename-file-form upload-rename-form" onSubmit={handleRenameFile}>
+              <input
+                id="dataset-name"
+                value={draftFileName}
+                onChange={(event) => setDraftFileName(event.target.value)}
+                disabled={busyAction === 'renaming'}
+                aria-label="Dataset name"
+              />
+              <button
+                type="submit"
+                className="editor-toolbar__button icon-only-button"
+                disabled={!draftFileName.trim() || draftFileName.trim() === fileName || busyAction === 'renaming'}
+                title="Rename file"
+                aria-label="Rename file"
+              >
+                <IconButtonContent icon="edit" label="Rename file" />
+              </button>
+            </form>
+          ) : null}
         </div>
 
         {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
@@ -384,52 +368,7 @@ function UploadPage() {
             />
           </div>
         )}
-
-        <footer className="query-status-bar">
-          <span>{columns.length} COLUMNS</span>
-          <span>{editableRows.length} ROWS</span>
-          <span>{totalMissing(rawProfile?.column_profiles ?? [])} MISSING</span>
-          <span>{formatBytes(datasetMeta.sizeBytes)}</span>
-          <span>{fileName ? `Uploaded ${formatDateTime(datasetMeta.uploadedAt)}` : 'No active preview'}</span>
-        </footer>
       </section>
-
-      <aside className="query-settings-panel">
-        <div className="query-settings-panel__head">
-          <strong>Query Settings</strong>
-        </div>
-
-        <div className="query-setting-group">
-          <span>Properties</span>
-          <label htmlFor="query-name">Name</label>
-          <form className="rename-file-form" onSubmit={handleRenameFile}>
-            <input
-              id="query-name"
-              value={draftFileName}
-              onChange={(event) => setDraftFileName(event.target.value)}
-              disabled={!hasDataset || busyAction === 'renaming'}
-            />
-            <button
-              type="submit"
-              className="editor-toolbar__button icon-only-button"
-              disabled={!hasDataset || !draftFileName.trim() || draftFileName.trim() === fileName || busyAction === 'renaming'}
-              title="Rename file"
-              aria-label="Rename file"
-            >
-              <IconButtonContent icon="edit" label="Rename file" />
-            </button>
-          </form>
-        </div>
-
-        <div className="query-setting-group">
-          <span>Applied Steps</span>
-          <div className="applied-step">Source</div>
-          <div className="applied-step">Navigation</div>
-          <div className="applied-step">Promoted Headers</div>
-          {hasUnsavedChanges ? <div className="applied-step applied-step--pending">Pending Edits</div> : null}
-          {saveMessage ? <div className="applied-step applied-step--saved">Saved Edits</div> : null}
-        </div>
-      </aside>
     </div>
   )
 }

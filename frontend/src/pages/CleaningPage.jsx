@@ -122,42 +122,46 @@ function CleaningOptionToggle({ option, checked, onChange }) {
 
 function SmartRecommendationPanel({ recommendations, onApply }) {
   return (
-    <section className="smart-recommendation-panel">
-      <div className="smart-recommendation-head">
+    <details className="smart-recommendation-panel">
+      <summary className="smart-recommendation-head">
         <div>
           <span>Smart Recommendations</span>
-          <h2>Suggested cleaning plan</h2>
-          <p>ATLAS reads the profile and flags the cleaning rules most likely to improve this dataset.</p>
+          <h2>{recommendations.length} suggested cleaning rule(s)</h2>
+          <p>Open only when you want ATLAS to preselect likely rules.</p>
         </div>
+        <em>Open</em>
+      </summary>
+
+      <div className="smart-recommendation-body">
         <button
           type="button"
-          className="primary-button icon-only-button"
+          className="primary-button smart-recommendation-apply"
           onClick={onApply}
           disabled={recommendations.length === 0}
           title="Apply recommendations"
           aria-label="Apply recommendations"
         >
-          <IconButtonContent icon="spark" label="Apply recommendations" />
+          <IconButtonContent icon="spark" label="Apply recommendations" showLabel />
         </button>
-      </div>
 
-      {recommendations.length > 0 ? (
-        <div className="smart-recommendation-grid">
-          {recommendations.map((recommendation) => (
-            <article key={recommendation.id} className="smart-recommendation-card">
-              <div>
-                <strong>{recommendation.title}</strong>
-                <span>{recommendation.reason}</span>
-              </div>
-              <small>{recommendation.impact}</small>
-              <em>{recommendation.confidence}% confidence</em>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <p className="empty-state-inline">No high-confidence recommendation is needed for the current profile.</p>
-      )}
-    </section>
+        {recommendations.length > 0 ? (
+          <div className="smart-recommendation-grid">
+            {recommendations.map((recommendation) => (
+              <article key={recommendation.id} className="smart-recommendation-card">
+                <div>
+                  <strong>{recommendation.title}</strong>
+                  <span>{recommendation.reason}</span>
+                </div>
+                <small>{recommendation.impact}</small>
+                <em>{recommendation.confidence}% confidence</em>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state-inline">No high-confidence recommendation is needed for the current profile.</p>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -388,10 +392,9 @@ function CleaningPage() {
         </div>
       </section>
 
-      <section className="quality-score-comparison">
-        <QualityScoreCard title="Raw Quality Score" report={rawQualityReport} muted={hasCleaned} />
+      <section className="quality-score-comparison quality-score-comparison--single">
         <QualityScoreCard
-          title={hasCleaned ? 'Cleaned Quality Score' : 'Projected Cleaned Score'}
+          title={hasCleaned ? 'Cleaned Quality Score' : 'Current Quality Score'}
           report={hasCleaned ? cleanedQualityReport : rawQualityReport}
         />
       </section>

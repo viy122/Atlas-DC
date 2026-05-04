@@ -26,6 +26,34 @@ const AGGREGATION_OPTIONS = [
   { value: 'max', label: 'Max' },
 ]
 
+const SORT_OPTIONS = [
+  { value: 'source', label: 'Original order' },
+  { value: 'value-desc', label: 'Highest first' },
+  { value: 'value-asc', label: 'Lowest first' },
+  { value: 'label-asc', label: 'A to Z' },
+]
+
+const TOP_N_OPTIONS = [
+  { value: '', label: 'All values' },
+  { value: '5', label: 'Top 5' },
+  { value: '10', label: 'Top 10' },
+  { value: '15', label: 'Top 15' },
+  { value: '20', label: 'Top 20' },
+]
+
+const DATE_GROUP_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'day', label: 'Daily' },
+  { value: 'week', label: 'Weekly' },
+  { value: 'month', label: 'Monthly' },
+]
+
+const KPI_MODE_OPTIONS = [
+  { value: 'overall', label: 'Overall' },
+  { value: 'highest', label: 'Highest group' },
+  { value: 'lowest', label: 'Lowest group' },
+]
+
 const APEX_TYPES = new Set(['line', 'area', 'bar', 'pie', 'donut', 'scatter'])
 const SAVED_DASHBOARD_PREFIX = 'atlas:finalizedDashboard:'
 const CANVAS_LAYOUT_PREFIX = 'atlas:blankCanvas:'
@@ -83,12 +111,43 @@ function normalizeAggregation(value) {
   return value
 }
 
+function normalizeSortOrder(value) {
+  return SORT_OPTIONS.some((option) => option.value === value) ? value : 'source'
+}
+
+function normalizeTopN(value) {
+  const normalized = String(value ?? '')
+  return TOP_N_OPTIONS.some((option) => option.value === normalized) ? normalized : ''
+}
+
+function normalizeDateGrouping(value) {
+  return DATE_GROUP_OPTIONS.some((option) => option.value === value) ? value : 'auto'
+}
+
+function normalizeKpiMode(value) {
+  return KPI_MODE_OPTIONS.some((option) => option.value === value) ? value : 'overall'
+}
+
 function buildDefaultSettings(chart, columns, numericColumns) {
+  const chartSettings = chart?.settings ?? {}
+
   return {
-    chart_type: normalizeChartType(chart),
-    x_axis: chart?.x_axis || columns[0] || '',
-    y_axis: chart?.y_axis || numericColumns[0] || '',
-    aggregation: normalizeAggregation(chart?.aggregation),
+    chart_type: chartSettings.chart_type || normalizeChartType(chart),
+    x_axis: chartSettings.x_axis || chart?.x_axis || columns[0] || '',
+    y_axis: chartSettings.y_axis || chart?.y_axis || numericColumns[0] || '',
+    aggregation: normalizeAggregation(chartSettings.aggregation || chart?.aggregation),
+    sort_order: normalizeSortOrder(chartSettings.sort_order),
+    top_n: normalizeTopN(chartSettings.top_n),
+    date_grouping: normalizeDateGrouping(chartSettings.date_grouping),
+  }
+}
+
+function getBackendChartSettings(settings = {}) {
+  return {
+    chart_type: settings.chart_type || 'bar',
+    x_axis: settings.x_axis || '',
+    y_axis: settings.y_axis || '',
+    aggregation: normalizeAggregation(settings.aggregation),
   }
 }
 
@@ -157,6 +216,20 @@ function getDisplayColumnType(column, columns = []) {
   return 'categorical'
 }
 
+function getNumericCanvasColumns(columns = [], columnProfiles = []) {
+  return columns.filter((column) => getDisplayColumnType(column, columnProfiles) === 'numeric')
+}
+
+function getKpiMetricColumns(columns = [], columnProfiles = []) {
+  const numericColumns = getNumericCanvasColumns(columns, columnProfiles)
+  const preferredColumns = numericColumns.filter((column) => !isIdentifierLikeField(column))
+  return preferredColumns.length ? preferredColumns : numericColumns
+}
+
+function getKpiGroupColumns(columns = [], columnProfiles = []) {
+  return columns.filter((column) => ['categorical', 'date'].includes(getDisplayColumnType(column, columnProfiles)))
+}
+
 function getAggregationLabel(aggregation) {
   const option = AGGREGATION_OPTIONS.find((item) => item.value === aggregation)
   return option?.label || 'Count'
@@ -189,6 +262,25 @@ function getCanvasVisualTitle(visual) {
   const measure = getMeasureField(visual)
   const dimension = getDimensionField(visual)
   const chartType = visual.settings?.chart_type || visual.type
+
+  if (visual.kind === 'kpi') {
+    const kpiMode = normalizeKpiMode(visual.settings?.kpiMode)
+    const measureLabel = measure || 'records'
+
+    if (kpiMode === 'highest' && dimension) {
+      return `Highest ${dimension}`
+    }
+
+    if (kpiMode === 'lowest' && dimension) {
+      return `Lowest ${dimension}`
+    }
+
+    if (measure) {
+      return `${aggregationLabel} of ${measureLabel}`
+    }
+
+    return 'Record Count'
+  }
 
   if (chartType === 'histogram') {
     const histogramField = dimension || measure
@@ -366,6 +458,7 @@ function createCanvasVisual(type, index = 0) {
     settings: {
       chart_type: isChart ? safeType : 'bar',
       aggregation: isKpi ? 'count' : 'count',
+      kpiMode: 'overall',
       title: defaults.title,
       titleTouched: false,
       subtitle: '',
@@ -423,6 +516,7 @@ function normalizeCanvasVisual(rawVisual, index = 0) {
       aggregation: AGGREGATION_OPTIONS.some((option) => option.value === rawVisual?.settings?.aggregation)
         ? rawVisual.settings.aggregation
         : defaults.settings.aggregation,
+      kpiMode: normalizeKpiMode(rawVisual?.settings?.kpiMode),
       titleTouched: Boolean(rawVisual?.settings?.titleTouched),
       fontFamily: FONT_FAMILY_OPTIONS.some((option) => option.value === rawVisual?.settings?.fontFamily)
         ? rawVisual.settings.fontFamily
@@ -495,11 +589,8 @@ function smartAssignFieldToVisual(visual, fieldName, columnProfiles, targetField
     } else if (visual.kind === 'kpi') {
       if (fieldType === 'numeric') {
         resolvedTarget = 'values'
-      } else if (!visual.fields?.label) {
-        resolvedTarget = 'label'
       } else {
-        resolvedTarget = 'filters'
-        multiple = true
+        resolvedTarget = 'label'
       }
     } else if (visual.kind === 'chart') {
       const hasDimension = Boolean(visual.fields?.x_axis)
@@ -529,6 +620,16 @@ function smartAssignFieldToVisual(visual, fieldName, columnProfiles, targetField
 
   nextVisual = setCanvasField(nextVisual, resolvedTarget, fieldName, false, multiple)
 
+  if (visual.kind === 'kpi' && resolvedTarget === 'label') {
+    nextVisual = updateCanvasVisualTitle({
+      ...nextVisual,
+      settings: {
+        ...nextVisual.settings,
+        kpiMode: normalizeKpiMode(nextVisual.settings?.kpiMode) === 'overall' ? 'highest' : nextVisual.settings?.kpiMode,
+      },
+    })
+  }
+
   if (
     fieldType === 'numeric' &&
     ['y_axis', 'values'].includes(resolvedTarget) &&
@@ -545,6 +646,30 @@ function smartAssignFieldToVisual(visual, fieldName, columnProfiles, targetField
   }
 
   return nextVisual
+}
+
+function configureDefaultKpiVisual(visual, columns, columnProfiles) {
+  if (visual.kind !== 'kpi') {
+    return visual
+  }
+
+  const metricField = getKpiMetricColumns(columns, columnProfiles)[0] || ''
+  const settings = {
+    ...visual.settings,
+    kpiMode: 'overall',
+    aggregation: metricField && !isIdentifierLikeField(metricField) ? 'sum' : 'count',
+  }
+  const nextVisual = metricField
+    ? {
+        ...setCanvasField(visual, 'values', metricField),
+        settings,
+      }
+    : {
+        ...visual,
+        settings,
+      }
+
+  return updateCanvasVisualTitle(nextVisual)
 }
 
 function createCanvasVisualFromField(fieldName, columnProfiles, numericColumns, index = 0) {
@@ -979,18 +1104,60 @@ function getCanvasVisualRenderKey(visual) {
   }
 }
 
+function computeGroupedCanvasKpi(rows, metricField, groupField, aggregation, mode) {
+  if (!groupField) {
+    return null
+  }
+
+  const groupedRows = new Map()
+  rows.forEach((row) => {
+    const label = formatCanvasLabel(row[groupField])
+    const values = groupedRows.get(label) ?? []
+    values.push(metricField ? row[metricField] : row)
+    groupedRows.set(label, values)
+  })
+
+  const groups = [...groupedRows.entries()]
+    .map(([label, values]) => ({
+      label,
+      value: aggregateCanvasValues(values, metricField ? aggregation : 'count'),
+    }))
+    .filter((group) => group.value !== null && group.value !== undefined && Number.isFinite(Number(group.value)))
+
+  if (!groups.length) {
+    return null
+  }
+
+  groups.sort((left, right) => Number(right.value) - Number(left.value))
+  return mode === 'lowest' ? groups[groups.length - 1] : groups[0]
+}
+
 function computeCanvasKpi(visual, rows) {
   const safeRows = Array.isArray(rows) ? rows : []
-  const field = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
-  const aggregation = visual.settings?.aggregation || 'count'
-  const values = field ? safeRows.map((row) => row[field]) : safeRows
+  const metricField = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
+  const groupField = visual.fields?.label || ''
+  const aggregation = metricField ? visual.settings?.aggregation || 'sum' : 'count'
+  const kpiMode = normalizeKpiMode(visual.settings?.kpiMode)
+  const aggregationLabel = getAggregationLabel(aggregation)
+  const metricLabel = metricField || 'records'
+
+  if (kpiMode !== 'overall' && groupField) {
+    const group = computeGroupedCanvasKpi(safeRows, metricField, groupField, aggregation, kpiMode)
+
+    return {
+      label: getCanvasVisualTitle(visual),
+      value: group ? formatValue(group.value) : 'N/A',
+      hint: visual.settings?.subtitle || (group ? `${groupField}: ${group.label}` : 'No matching records'),
+    }
+  }
+
+  const values = metricField ? safeRows.map((row) => row[metricField]) : safeRows
   const rawValue = aggregateCanvasValues(values, aggregation)
-  const labelField = visual.fields?.label || ''
 
   return {
     label: getCanvasVisualTitle(visual),
     value: formatValue(rawValue ?? safeRows.length),
-    hint: visual.settings?.subtitle || (labelField ? `Filtered by ${labelField}` : field || 'Filtered rows'),
+    hint: visual.settings?.subtitle || `${aggregationLabel} of ${metricLabel}`,
   }
 }
 
@@ -1148,7 +1315,7 @@ function WorkspaceControlPanel({
         </div>
         <div className="visual-workspace-actions">
           <button type="button" className="visual-secondary-button" onClick={onBlankWorkspace}>
-            <IconButtonContent icon="plus" label="New blank sheet" showLabel />
+            <IconButtonContent icon="plus" label="Blank Canvas" showLabel />
           </button>
           <button
             type="button"
@@ -1203,6 +1370,416 @@ function ChartTypeSelector({ value, onChange }) {
       ))}
     </div>
   )
+}
+
+function ChartViewSettingsControls({ settings, onChange, controlPrefix = 'chart' }) {
+  return (
+    <>
+      <label>
+        <span>Top N</span>
+        <select
+          value={normalizeTopN(settings?.top_n)}
+          onChange={(event) => onChange('top_n', event.target.value)}
+        >
+          {TOP_N_OPTIONS.map((option) => (
+            <option key={`${controlPrefix}-top-${option.value || 'all'}`} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        <span>Sort</span>
+        <select
+          value={normalizeSortOrder(settings?.sort_order)}
+          onChange={(event) => onChange('sort_order', event.target.value)}
+        >
+          {SORT_OPTIONS.map((option) => (
+            <option key={`${controlPrefix}-sort-${option.value}`} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        <span>Date grouping</span>
+        <select
+          value={normalizeDateGrouping(settings?.date_grouping)}
+          onChange={(event) => onChange('date_grouping', event.target.value)}
+        >
+          {DATE_GROUP_OPTIONS.map((option) => (
+            <option key={`${controlPrefix}-date-${option.value}`} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
+  )
+}
+
+function cloneChartPoint(point) {
+  if (Array.isArray(point)) {
+    return [...point]
+  }
+
+  if (point && typeof point === 'object') {
+    return { ...point }
+  }
+
+  return point
+}
+
+function cloneChartSeries(series) {
+  if (!Array.isArray(series)) {
+    return []
+  }
+
+  return series.map((item) => {
+    if (Array.isArray(item)) {
+      return [...item]
+    }
+
+    if (item && typeof item === 'object') {
+      return {
+        ...item,
+        data: Array.isArray(item.data) ? item.data.map(cloneChartPoint) : item.data,
+      }
+    }
+
+    return item
+  })
+}
+
+function cloneChartOptions(options = {}) {
+  const xaxis = options.xaxis
+    ? {
+        ...options.xaxis,
+        categories: Array.isArray(options.xaxis.categories) ? [...options.xaxis.categories] : options.xaxis.categories,
+      }
+    : options.xaxis
+
+  return {
+    ...options,
+    labels: Array.isArray(options.labels) ? [...options.labels] : options.labels,
+    xaxis,
+  }
+}
+
+function getDisplayPointLabel(point, fallback) {
+  if (point && typeof point === 'object' && !Array.isArray(point)) {
+    if (Object.hasOwn(point, 'x')) {
+      return point.x
+    }
+
+    if (Object.hasOwn(point, 'label')) {
+      return point.label
+    }
+  }
+
+  if (Array.isArray(point)) {
+    return point[0]
+  }
+
+  return fallback
+}
+
+function getDisplayPointValue(point) {
+  const rawValue = point && typeof point === 'object' && !Array.isArray(point)
+    ? point.y
+    : Array.isArray(point)
+      ? point[1]
+      : point
+  const numericValue = Number(rawValue)
+  return Number.isFinite(numericValue) ? numericValue : 0
+}
+
+function getDisplayMetric(values) {
+  const numericValue = values.map(Number).find(Number.isFinite)
+  return Number.isFinite(numericValue) ? numericValue : 0
+}
+
+function formatDisplayDate(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-')
+}
+
+function parseDisplayDate(value) {
+  const rawValue = String(value ?? '').trim()
+  const dateMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})/)
+
+  if (dateMatch) {
+    return new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]))
+  }
+
+  const parsedDate = new Date(rawValue)
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate
+}
+
+function getDateBucketInfo(value, grouping) {
+  const date = parseDisplayDate(value)
+  if (!date) {
+    return null
+  }
+
+  if (grouping === 'month') {
+    const monthStart = new Date(date.getFullYear(), date.getMonth(), 1)
+    const label = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`
+    return { key: label, label, time: monthStart.getTime() }
+  }
+
+  if (grouping === 'week') {
+    const weekStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+    const dayOffset = (weekStart.getDay() + 6) % 7
+    weekStart.setDate(weekStart.getDate() - dayOffset)
+    const label = `${formatDisplayDate(weekStart)} week`
+    return { key: label, label, time: weekStart.getTime() }
+  }
+
+  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const label = formatDisplayDate(dayStart)
+  return { key: label, label, time: dayStart.getTime() }
+}
+
+function aggregateDisplayValues(values, aggregation) {
+  const numericValues = values.map(Number).filter(Number.isFinite)
+  if (!numericValues.length) {
+    return 0
+  }
+
+  switch (normalizeAggregation(aggregation)) {
+    case 'average':
+      return numericValues.reduce((sum, value) => sum + value, 0) / numericValues.length
+    case 'min':
+      return Math.min(...numericValues)
+    case 'max':
+      return Math.max(...numericValues)
+    default:
+      return numericValues.reduce((sum, value) => sum + value, 0)
+  }
+}
+
+function extractDisplayChartPoints(chart, series, options) {
+  const chartType = normalizeChartType(chart)
+  if (chartType === 'histogram' || chart?.type === 'scatter') {
+    return null
+  }
+
+  if (chart?.type === 'pie' || chart?.type === 'donut') {
+    const labels = Array.isArray(options.labels) ? options.labels : []
+    const points = series.map((value, index) => ({
+      label: String(labels[index] ?? `Slice ${index + 1}`),
+      values: [getDisplayPointValue(value)],
+      metric: getDisplayPointValue(value),
+      sourceIndex: index,
+    }))
+
+    return { mode: 'pie', points, seriesIndexes: [] }
+  }
+
+  const seriesIndexes = []
+  const usableSeries = []
+  series.forEach((item, index) => {
+    if (item && typeof item === 'object' && Array.isArray(item.data)) {
+      seriesIndexes.push(index)
+      usableSeries.push(item)
+    }
+  })
+
+  if (!usableSeries.length) {
+    return null
+  }
+
+  const categories = Array.isArray(options.xaxis?.categories) ? options.xaxis.categories : []
+  const dataLength = Math.max(categories.length, ...usableSeries.map((item) => item.data.length))
+  const hasCategories = categories.length > 0
+  const firstData = usableSeries[0]?.data ?? []
+  const mode = hasCategories ? 'category' : 'xy'
+
+  if (!hasCategories && !firstData.length) {
+    return null
+  }
+
+  const points = Array.from({ length: dataLength }, (_, index) => {
+    const fallbackLabel = `Point ${index + 1}`
+    const label = hasCategories
+      ? categories[index] ?? fallbackLabel
+      : getDisplayPointLabel(firstData[index], fallbackLabel)
+    const values = usableSeries.map((item) => getDisplayPointValue(item.data[index]))
+
+    return {
+      label: String(label ?? fallbackLabel),
+      values,
+      metric: getDisplayMetric(values),
+      sourceIndex: index,
+    }
+  })
+
+  return { mode, points, seriesIndexes }
+}
+
+function groupDisplayPointsByDate(points, grouping, aggregation) {
+  if (grouping === 'auto' || !points.length) {
+    return points
+  }
+
+  const bucketedPoints = points.map((point) => ({
+    point,
+    bucket: getDateBucketInfo(point.label, grouping),
+  }))
+
+  if (bucketedPoints.some((item) => !item.bucket)) {
+    return points
+  }
+
+  const groupedPoints = new Map()
+  bucketedPoints.forEach(({ point, bucket }) => {
+    const currentBucket = groupedPoints.get(bucket.key) ?? {
+      label: bucket.label,
+      time: bucket.time,
+      values: point.values.map(() => []),
+      sourceIndex: point.sourceIndex,
+    }
+
+    point.values.forEach((value, index) => {
+      currentBucket.values[index].push(value)
+    })
+    groupedPoints.set(bucket.key, currentBucket)
+  })
+
+  return [...groupedPoints.values()]
+    .sort((left, right) => left.time - right.time)
+    .map((bucket) => {
+      const values = bucket.values.map((items) => aggregateDisplayValues(items, aggregation))
+      return {
+        label: bucket.label,
+        values,
+        metric: getDisplayMetric(values),
+        sourceIndex: bucket.sourceIndex,
+      }
+    })
+}
+
+function sortAndLimitDisplayPoints(points, settings) {
+  const topN = Number(normalizeTopN(settings.top_n))
+  const sortOrder = topN && normalizeSortOrder(settings.sort_order) === 'source'
+    ? 'value-desc'
+    : normalizeSortOrder(settings.sort_order)
+  const sortedPoints = [...points]
+
+  if (sortOrder === 'value-desc') {
+    sortedPoints.sort((left, right) => right.metric - left.metric)
+  } else if (sortOrder === 'value-asc') {
+    sortedPoints.sort((left, right) => left.metric - right.metric)
+  } else if (sortOrder === 'label-asc') {
+    sortedPoints.sort((left, right) => left.label.localeCompare(right.label, undefined, { numeric: true }))
+  }
+
+  return topN > 0 ? sortedPoints.slice(0, topN) : sortedPoints
+}
+
+function hasDisplayChartTransforms(settings = {}) {
+  return Boolean(
+    normalizeTopN(settings.top_n) ||
+      normalizeSortOrder(settings.sort_order) !== 'source' ||
+      normalizeDateGrouping(settings.date_grouping) !== 'auto',
+  )
+}
+
+function rebuildDisplayChart(extractedChart, points, series, options, settings) {
+  if (extractedChart.mode === 'pie') {
+    return {
+      series: points.map((point) => Number(point.values[0] ?? 0)),
+      options: {
+        ...options,
+        labels: points.map((point) => point.label),
+      },
+    }
+  }
+
+  const nextSeries = series.map((item, seriesIndex) => {
+    const displaySeriesIndex = extractedChart.seriesIndexes.indexOf(seriesIndex)
+    if (displaySeriesIndex < 0 || !item || typeof item !== 'object') {
+      return item
+    }
+
+    if (extractedChart.mode === 'xy') {
+      return {
+        ...item,
+        data: points.map((point) => ({
+          x: point.label,
+          y: Number(point.values[displaySeriesIndex] ?? 0),
+        })),
+      }
+    }
+
+    return {
+      ...item,
+      data: points.map((point) => Number(point.values[displaySeriesIndex] ?? 0)),
+    }
+  })
+  const xaxis = {
+    ...(options.xaxis ?? {}),
+    categories: extractedChart.mode === 'category'
+      ? points.map((point) => point.label)
+      : options.xaxis?.categories,
+  }
+
+  if (
+    extractedChart.mode === 'xy' &&
+    (normalizeDateGrouping(settings.date_grouping) !== 'auto' ||
+      normalizeSortOrder(settings.sort_order) !== 'source' ||
+      normalizeTopN(settings.top_n))
+  ) {
+    xaxis.type = 'category'
+  }
+
+  return {
+    series: nextSeries,
+    options: {
+      ...options,
+      xaxis,
+    },
+  }
+}
+
+function transformChartForDisplay(chart, viewSettings = {}) {
+  const settings = {
+    sort_order: normalizeSortOrder(viewSettings.sort_order),
+    top_n: normalizeTopN(viewSettings.top_n),
+    date_grouping: normalizeDateGrouping(viewSettings.date_grouping),
+    aggregation: normalizeAggregation(viewSettings.aggregation || chart?.aggregation),
+  }
+
+  if (!hasDisplayChartTransforms(settings)) {
+    return chart
+  }
+
+  const series = cloneChartSeries(chart?.series)
+  const options = cloneChartOptions(chart?.options ?? {})
+  const extractedChart = extractDisplayChartPoints(chart, series, options)
+
+  if (!extractedChart) {
+    return { ...chart, series, options }
+  }
+
+  const groupedPoints = groupDisplayPointsByDate(
+    extractedChart.points,
+    settings.date_grouping,
+    settings.aggregation,
+  )
+  const displayPoints = sortAndLimitDisplayPoints(groupedPoints, settings)
+  const rebuiltChart = rebuildDisplayChart(extractedChart, displayPoints, series, options, settings)
+
+  return {
+    ...chart,
+    ...rebuiltChart,
+  }
 }
 
 function getChartFilterColumn(chart) {
@@ -1407,19 +1984,28 @@ function ChartCard({
   filterMetadataByColumn,
   filterState,
   onChartValueSelect,
+  viewSettings = {},
 }) {
-  const apexType = APEX_TYPES.has(chart?.type) ? chart.type : 'bar'
-  const series = Array.isArray(chart?.series) ? chart.series : []
-  const sourceOptions = chart?.options ?? {}
-  const filterColumn = getChartFilterColumn(chart)
+  const displaySettings = {
+    sort_order: normalizeSortOrder(viewSettings.sort_order),
+    top_n: normalizeTopN(viewSettings.top_n),
+    date_grouping: normalizeDateGrouping(viewSettings.date_grouping),
+  }
+  const displayChart = transformChartForDisplay(chart, viewSettings)
+  const apexType = APEX_TYPES.has(displayChart?.type) ? displayChart.type : 'bar'
+  const series = Array.isArray(displayChart?.series) ? displayChart.series : []
+  const sourceOptions = displayChart?.options ?? {}
+  const filterColumn = getChartFilterColumn(displayChart)
   const chartFilter = filterColumn ? filterMetadataByColumn?.get(filterColumn) : null
   const chartFilterState = filterColumn ? filterState?.[filterColumn] : null
+  const isGroupedDateFilter = chartFilter?.type === 'datetime' && displaySettings.date_grouping !== 'auto'
   const isFilterableChart = Boolean(
-    !chart?.empty &&
+    !displayChart?.empty &&
       chartFilter &&
-      onChartValueSelect,
+      onChartValueSelect &&
+      !isGroupedDateFilter,
   )
-  const pointValues = getChartPointValues(chart, sourceOptions, series)
+  const pointValues = getChartPointValues(displayChart, sourceOptions, series)
   const selectedPointIndex =
     chartFilter && chartFilterState
       ? pointValues.findIndex((value) => chartPointMatchesFilter(chartFilter, chartFilterState, value))
@@ -1442,7 +2028,7 @@ function ChartCard({
             return
           }
 
-          const selectedValue = resolveChartPointValue(chart, sourceOptions, series, config)
+          const selectedValue = resolveChartPointValue(displayChart, sourceOptions, series, config)
           if (selectedValue === null || selectedValue === undefined) {
             return
           }
@@ -1459,9 +2045,11 @@ function ChartCard({
       intersect: true,
     },
   }
-  const displayTitle = textOverride.title || chart?.title || 'Auto Chart'
+  const displayTitle = textOverride.title || displayChart?.title || 'Auto Chart'
   const displayDescription = textOverride.subtitle || ''
   const displayCaption = textOverride.caption || ''
+  const displaySettingsKey = `${displaySettings.sort_order}:${displaySettings.top_n}:${displaySettings.date_grouping}`
+  const displayRenderMode = hasDisplayChartTransforms(displaySettings) ? 'display-transform' : 'source-chart'
 
   if (isFilterableChart && ['line', 'area', 'scatter'].includes(apexType)) {
     const sourceMarkerSize = Number(sourceOptions.markers?.size ?? 4)
@@ -1555,11 +2143,11 @@ function ChartCard({
       </header>
 
       <div className="visual-chart-body">
-        {chart?.empty ? (
-          <div className="visual-chart-empty">{chart.description}</div>
+        {displayChart?.empty ? (
+          <div className="visual-chart-empty">{displayChart.description}</div>
         ) : (
           <ChartRenderErrorBoundary
-            resetKey={`${chart?.id}:${apexType}:${chart?.x_axis}:${chart?.y_axis}:${series.length}`}
+            resetKey={`${displayChart?.id}:${apexType}:${displayChart?.x_axis}:${displayChart?.y_axis}:${series.length}:${displaySettingsKey}:${displayRenderMode}`}
           >
             <Chart options={options} series={series} type={apexType} height={210} width="100%" />
           </ChartRenderErrorBoundary>
@@ -1652,6 +2240,12 @@ function ManualChartBuilder({
                 ))}
               </select>
             </label>
+
+            <ChartViewSettingsControls
+              settings={settings}
+              controlPrefix="manual"
+              onChange={onSettingChange}
+            />
 
             <button
               type="button"
@@ -2412,6 +3006,10 @@ function BlankCanvasSidebar({
   })
   const fieldWells = selectedVisual ? getFieldWellsForVisual(selectedVisual) : []
   const selectedChartType = selectedVisual?.settings?.chart_type || selectedVisual?.type
+  const kpiMetricColumns = getKpiMetricColumns(columns, columnProfiles)
+  const kpiGroupColumns = getKpiGroupColumns(columns, columnProfiles)
+  const selectedKpiMetric = selectedVisual?.fields?.values?.[0] || selectedVisual?.fields?.y_axis || ''
+  const selectedKpiMode = normalizeKpiMode(selectedVisual?.settings?.kpiMode)
   const toggleSection = (section) => {
     setOpenSections((previous) => ({
       ...previous,
@@ -2431,6 +3029,50 @@ function BlankCanvasSidebar({
   ]
     .filter(Boolean)
     .join(' ')
+  const updateKpiMetric = (value) => {
+    if (!selectedVisual) {
+      return
+    }
+
+    if (value) {
+      onUpdateField(selectedVisual.id, 'values', value, false, false)
+      if (isIdentifierLikeField(value)) {
+        onUpdateSetting(selectedVisual.id, 'aggregation', 'count')
+      }
+      return
+    }
+
+    if (selectedKpiMetric) {
+      onUpdateField(selectedVisual.id, 'values', selectedKpiMetric, true, false)
+    }
+    onUpdateSetting(selectedVisual.id, 'aggregation', 'count')
+  }
+  const updateKpiMode = (value) => {
+    if (!selectedVisual) {
+      return
+    }
+
+    onUpdateSetting(selectedVisual.id, 'kpiMode', value)
+
+    if (value !== 'overall' && !selectedVisual.fields?.label && kpiGroupColumns[0]) {
+      onUpdateField(selectedVisual.id, 'label', kpiGroupColumns[0], false, false)
+    }
+  }
+  const updateKpiGroup = (value) => {
+    if (!selectedVisual) {
+      return
+    }
+
+    if (value) {
+      onUpdateField(selectedVisual.id, 'label', value, false, false)
+      return
+    }
+
+    if (selectedVisual.fields?.label) {
+      onUpdateField(selectedVisual.id, 'label', selectedVisual.fields.label, true, false)
+    }
+    onUpdateSetting(selectedVisual.id, 'kpiMode', 'overall')
+  }
 
   return (
     <div className={sidePaneClassName}>
@@ -2510,32 +3152,101 @@ function BlankCanvasSidebar({
                 </div>
               ) : null}
 
-              <div className="blank-field-well-stack">
-                {fieldWells.map((well) => (
-                  <FieldDropZone
-                    key={`${selectedVisual.id}-${well.field}`}
-                    label={well.label}
-                    value={
-                      well.multiple
-                        ? selectedVisual.fields?.[well.field] ?? []
-                        : well.field === 'values'
-                          ? selectedVisual.fields?.values?.[0]
-                          : selectedVisual.fields?.[well.field]
-                    }
-                    multiple={well.multiple}
-                    acceptedTypes={well.acceptedTypes}
-                    columnProfiles={columnProfiles}
-                    onDropField={(fieldName) =>
-                      onUpdateField(selectedVisual.id, well.field, fieldName, false, well.multiple)
-                    }
-                    onRemoveField={(fieldName) =>
-                      onUpdateField(selectedVisual.id, well.field, fieldName, true, well.multiple)
-                    }
-                  />
-                ))}
-              </div>
+              {selectedVisual.kind === 'kpi' ? (
+                <div className="blank-kpi-setup">
+                  <label>
+                    <span>Metric</span>
+                    <select
+                      value={selectedKpiMetric}
+                      onChange={(event) => updateKpiMetric(event.target.value)}
+                    >
+                      <option value="">Record count</option>
+                      {kpiMetricColumns.map((column) => (
+                        <option key={`kpi-metric-${column}`} value={column}>
+                          {column}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-              {['chart', 'kpi'].includes(selectedVisual.kind) ? (
+                  <label>
+                    <span>Calculation</span>
+                    <select
+                      value={selectedKpiMetric ? selectedVisual.settings?.aggregation || 'sum' : 'count'}
+                      disabled={!selectedKpiMetric}
+                      onChange={(event) => onUpdateSetting(selectedVisual.id, 'aggregation', event.target.value)}
+                    >
+                      {AGGREGATION_OPTIONS.map((option) => (
+                        <option key={`canvas-kpi-agg-${option.value}`} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Mode</span>
+                    <select
+                      value={selectedKpiMode}
+                      onChange={(event) => updateKpiMode(event.target.value)}
+                    >
+                      {KPI_MODE_OPTIONS.map((option) => (
+                        <option
+                          key={`canvas-kpi-mode-${option.value}`}
+                          value={option.value}
+                          disabled={option.value !== 'overall' && !kpiGroupColumns.length}
+                        >
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {selectedKpiMode !== 'overall' ? (
+                    <label>
+                      <span>Group by</span>
+                      <select
+                        value={selectedVisual.fields?.label || ''}
+                        onChange={(event) => updateKpiGroup(event.target.value)}
+                      >
+                        <option value="">None</option>
+                        {kpiGroupColumns.map((column) => (
+                          <option key={`kpi-group-${column}`} value={column}>
+                            {column}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="blank-field-well-stack">
+                  {fieldWells.map((well) => (
+                    <FieldDropZone
+                      key={`${selectedVisual.id}-${well.field}`}
+                      label={well.label}
+                      value={
+                        well.multiple
+                          ? selectedVisual.fields?.[well.field] ?? []
+                          : well.field === 'values'
+                            ? selectedVisual.fields?.values?.[0]
+                            : selectedVisual.fields?.[well.field]
+                      }
+                      multiple={well.multiple}
+                      acceptedTypes={well.acceptedTypes}
+                      columnProfiles={columnProfiles}
+                      onDropField={(fieldName) =>
+                        onUpdateField(selectedVisual.id, well.field, fieldName, false, well.multiple)
+                      }
+                      onRemoveField={(fieldName) =>
+                        onUpdateField(selectedVisual.id, well.field, fieldName, true, well.multiple)
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+
+              {selectedVisual.kind === 'chart' ? (
                 <label>
                   <span>Aggregation</span>
                   <select
@@ -3054,6 +3765,12 @@ function DashboardEditorPanel({
             </select>
           </label>
 
+          <ChartViewSettingsControls
+            settings={settings}
+            controlPrefix={`panel-${chart.id}`}
+            onChange={(field, value) => onSettingChange(chart.id, field, value)}
+          />
+
           <button
             type="button"
             className="visual-apply-button"
@@ -3092,6 +3809,9 @@ function VisualizationPage() {
     x_axis: '',
     y_axis: '',
     aggregation: 'count',
+    sort_order: 'source',
+    top_n: '',
+    date_grouping: 'auto',
   })
   const [manualCharts, setManualCharts] = useState([])
   const [customKpis, setCustomKpis] = useState([])
@@ -3207,18 +3927,22 @@ function VisualizationPage() {
   }, [filterMetadata])
   const chartOverridePayload = useMemo(() => {
     const customizedAutoCharts = Object.keys(customChartsById)
-      .map((chartId) => ({
-        id: chartId,
-        source: 'auto',
-        ...(settingsById[chartId] ?? {}),
-      }))
+      .map((chartId) => {
+        const settings = settingsById[chartId] ?? customChartsById[chartId]?.settings ?? {}
+
+        return {
+          id: chartId,
+          source: 'auto',
+          ...getBackendChartSettings(settings),
+        }
+      })
       .filter((override) => override.chart_type)
 
     const manualChartOverrides = manualCharts
       .map((chart) => ({
         id: chart.id,
         source: 'manual',
-        ...(chart.settings ?? {}),
+        ...getBackendChartSettings(chart.settings ?? {}),
       }))
       .filter((override) => override.chart_type)
 
@@ -3276,6 +4000,9 @@ function VisualizationPage() {
     x_axis: manualSettings.x_axis || tableColumns[0] || '',
     y_axis: manualSettings.y_axis || numericColumns[0] || '',
     aggregation: manualSettings.aggregation || 'count',
+    sort_order: normalizeSortOrder(manualSettings.sort_order),
+    top_n: normalizeTopN(manualSettings.top_n),
+    date_grouping: normalizeDateGrouping(manualSettings.date_grouping),
   }
   const activeChart = activeEditor?.type === 'chart'
     ? dashboardCharts.find((chart) => chart.id === activeEditor.chartId)
@@ -3585,7 +4312,7 @@ function VisualizationPage() {
       const payload = await visualizeDatasetRows({
         columns: sourceColumns,
         rows: sourceRows,
-        override: effectiveManualSettings,
+        override: getBackendChartSettings(effectiveManualSettings),
       })
       const customChart = payload.custom_chart
       if (customChart) {
@@ -3676,7 +4403,10 @@ function VisualizationPage() {
   }
 
   function addCanvasVisual(type) {
-    const visual = createCanvasVisual(type, canvasVisuals.length)
+    const baseVisual = createCanvasVisual(type, canvasVisuals.length)
+    const visual = type === 'kpi'
+      ? configureDefaultKpiVisual(baseVisual, tableColumns, columnProfiles)
+      : baseVisual
     setCanvasVisuals((previous) => [...previous, visual])
     setSelectedCanvasVisualId(visual.id)
   }
@@ -4244,7 +4974,7 @@ function VisualizationPage() {
       const payload = await visualizeDatasetRows({
         columns: sourceColumns,
         rows: sourceRows,
-        override: settings,
+        override: getBackendChartSettings(settings),
       })
       const customChart = payload.custom_chart
       if (customChart) {
@@ -4490,35 +5220,42 @@ function VisualizationPage() {
 
             {presentationCharts.length > 0 ? (
               <div className="visual-chart-grid">
-                {presentationCharts.map((chart) => (
-                  <ChartCard
-                    key={chart.id}
-                    chart={chart}
-                    isFinalized={isFinalized}
-                    isMenuOpen={openChartMenuId === chart.id}
-                    onToggleMenu={() =>
-                      setOpenChartMenuId((current) => (current === chart.id ? '' : chart.id))
-                    }
-                    onCustomize={() => {
-                      setActiveEditor({ type: 'chart', chartId: chart.id, mode: 'customize' })
-                      setOpenChartMenuId('')
-                    }}
-                    onEditText={() => {
-                      setActiveEditor({ type: 'chart', chartId: chart.id, mode: 'text' })
-                      setOpenChartMenuId('')
-                    }}
-                    onRemove={() => removeChart(chart.id)}
-                    isDragging={draggingChartId === chart.id}
-                    onDragStart={(event) => handleDragStart(chart.id, event)}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => handleDrop(chart.id, event)}
-                    onDragEnd={() => setDraggingChartId('')}
-                    textOverride={presentationChartText[chart.id]}
-                    filterMetadataByColumn={filterMetadataByColumn}
-                    filterState={filterState}
-                    onChartValueSelect={updateChartDrivenFilter}
-                  />
-                ))}
+                {presentationCharts.map((chart) => {
+                  const viewSettings = settingsById[chart.id]
+                    ?? chart.settings
+                    ?? buildDefaultSettings(chart, tableColumns, numericColumns)
+
+                  return (
+                    <ChartCard
+                      key={chart.id}
+                      chart={chart}
+                      isFinalized={isFinalized}
+                      isMenuOpen={openChartMenuId === chart.id}
+                      onToggleMenu={() =>
+                        setOpenChartMenuId((current) => (current === chart.id ? '' : chart.id))
+                      }
+                      onCustomize={() => {
+                        setActiveEditor({ type: 'chart', chartId: chart.id, mode: 'customize' })
+                        setOpenChartMenuId('')
+                      }}
+                      onEditText={() => {
+                        setActiveEditor({ type: 'chart', chartId: chart.id, mode: 'text' })
+                        setOpenChartMenuId('')
+                      }}
+                      onRemove={() => removeChart(chart.id)}
+                      isDragging={draggingChartId === chart.id}
+                      onDragStart={(event) => handleDragStart(chart.id, event)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => handleDrop(chart.id, event)}
+                      onDragEnd={() => setDraggingChartId('')}
+                      textOverride={presentationChartText[chart.id]}
+                      filterMetadataByColumn={filterMetadataByColumn}
+                      filterState={filterState}
+                      onChartValueSelect={updateChartDrivenFilter}
+                      viewSettings={viewSettings}
+                    />
+                  )
+                })}
               </div>
             ) : (
               <div className="visual-empty-panel">
