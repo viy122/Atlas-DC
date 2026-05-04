@@ -8,7 +8,6 @@ const LINKS = [
   { to: '/cleaning', label: 'Clean', step: '03' },
   { to: '/analysis', label: 'Analyze', step: '04' },
   { to: '/visualization', label: 'Visualize', step: '05' },
-  { to: '/reports', label: 'Docs', step: '06' },
 ]
 
 function Sidebar() {

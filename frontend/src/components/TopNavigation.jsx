@@ -8,7 +8,6 @@ const LINKS = [
   { to: '/cleaning', label: 'Clean' },
   { to: '/analysis', label: 'Analyze' },
   { to: '/visualization', label: 'Visualize' },
-  { to: '/reports', label: 'Docs' },
 ]
 
 function TopNavigation() {

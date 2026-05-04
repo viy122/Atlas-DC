@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAtlas } from '../context/AtlasContext'
 import { buildQualityReport } from '../utils/dataQuality'
@@ -105,6 +106,40 @@ function InsightCard({ title, body, action, tone = 'default', meta }) {
   )
 }
 
+const AI_INSIGHT_SECTIONS = [
+  { key: 'key_insights', title: 'Key Insights' },
+  { key: 'trends', title: 'Trends' },
+  { key: 'data_quality_notes', title: 'Data Quality Notes' },
+  { key: 'simple_recommendations', title: 'Simple Recommendations' },
+]
+
+function normalizeAiItems(items) {
+  if (!Array.isArray(items)) {
+    return []
+  }
+
+  return items.map((item) => String(item).trim()).filter(Boolean)
+}
+
+function AiInsightSection({ title, items }) {
+  const normalizedItems = normalizeAiItems(items)
+
+  return (
+    <article className="surface-card ai-insight-section">
+      <h3>{title}</h3>
+      {normalizedItems.length > 0 ? (
+        <div className="ai-insight-copy-list">
+          {normalizedItems.map((item, index) => (
+            <p key={`${title}-${index}-${item.slice(0, 24)}`}>{item}</p>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-state-inline">No generated notes yet.</p>
+      )}
+    </article>
+  )
+}
+
 function AnalysisPage() {
   const {
     datasetId,
@@ -115,7 +150,44 @@ function AnalysisPage() {
     cleaningSummary,
     analysis,
     charts,
+    generateAiInsights,
   } = useAtlas()
+  const [aiInsightsPayload, setAiInsightsPayload] = useState(null)
+  const [aiInsightsLoading, setAiInsightsLoading] = useState(false)
+  const [aiInsightsError, setAiInsightsError] = useState({ contextKey: '', message: '' })
+  const aiContextKey = [
+    datasetId,
+    cleanedProfile ? 'cleaned' : 'raw',
+    rawProfile?.rows ?? 0,
+    cleanedProfile?.rows ?? 0,
+    cleaningSummary?.duplicates_removed ?? 0,
+    cleaningSummary?.missing_values_after ?? 0,
+  ].join(':')
+  const currentAiPayload = aiInsightsPayload?.contextKey === aiContextKey ? aiInsightsPayload.payload : null
+  const currentAiError = aiInsightsError.contextKey === aiContextKey ? aiInsightsError.message : ''
+
+  async function handleGenerateAiInsights() {
+    if (!datasetId || aiInsightsLoading) {
+      return
+    }
+
+    setAiInsightsLoading(true)
+    setAiInsightsError({ contextKey: aiContextKey, message: '' })
+
+    try {
+      const payload = await generateAiInsights({ stage: 'latest' })
+      setAiInsightsPayload({ contextKey: aiContextKey, payload })
+    } catch (error) {
+      setAiInsightsError({
+        contextKey: aiContextKey,
+        message:
+          error.message ||
+          'AI insights are unavailable right now. You can still use the built-in decision notes below.',
+      })
+    } finally {
+      setAiInsightsLoading(false)
+    }
+  }
 
   if (!datasetId) {
     return (
@@ -143,6 +215,8 @@ function AnalysisPage() {
   const bestCategory = topFrequencies[0]?.values?.[0]
   const chartCount = charts?.chart_configs?.length ?? charts?.charts?.length ?? 0
   const cleaningSteps = cleaningSummary?.cleaning_steps ?? []
+  const aiInsights = currentAiPayload?.insights ?? null
+  const hasAiInsights = AI_INSIGHT_SECTIONS.some(({ key }) => normalizeAiItems(aiInsights?.[key]).length > 0)
   const recommendations = [
     missingTotal > 0
       ? `Review ${formatValue(missingTotal)} remaining missing cells before final reporting.`
@@ -222,6 +296,49 @@ function AnalysisPage() {
               : 'Upload or clean more data to unlock stronger trend interpretation.'}
           </p>
         </aside>
+      </section>
+
+      <section className="ai-insights-panel" aria-busy={aiInsightsLoading}>
+        <div className="surface-card ai-insights-control">
+          <div>
+            <h2>Gemini AI Insights</h2>
+            <p>Human-readable interpretation generated from computed dataset summaries.</p>
+          </div>
+
+          <div className="ai-insights-actions">
+            {currentAiPayload?.cached ? <span className="status-badge">Cached</span> : null}
+            <button
+              type="button"
+              className="primary-button"
+              onClick={handleGenerateAiInsights}
+              disabled={aiInsightsLoading}
+            >
+              {aiInsightsLoading ? 'Generating...' : 'Generate AI Insights'}
+            </button>
+          </div>
+        </div>
+
+        {currentAiError ? (
+          <div className="error-banner ai-insights-error">
+            {currentAiError} Built-in analysis remains available below.
+          </div>
+        ) : null}
+
+        {hasAiInsights ? (
+          <div className="ai-insights-grid">
+            {AI_INSIGHT_SECTIONS.map((section) => (
+              <AiInsightSection
+                key={section.key}
+                title={section.title}
+                items={aiInsights?.[section.key]}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state-inline ai-insights-empty">
+            Generate AI insights when you want a plain-language readout for this dataset.
+          </p>
+        )}
       </section>
 
       <section className="insight-grid">

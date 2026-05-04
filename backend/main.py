@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import os
 import re
 import json
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from io import BytesIO
 from uuid import uuid4
@@ -41,6 +46,36 @@ NULL_TEXT_TOKENS = {
     "null",
     "none",
     "unknown",
+}
+GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+AI_INSIGHTS_CACHE_VERSION = "polished-v2"
+GEMINI_INSIGHTS_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "key_insights": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+        },
+        "trends": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+        },
+        "data_quality_notes": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+        },
+        "simple_recommendations": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+        },
+    },
+    "required": [
+        "key_insights",
+        "trends",
+        "data_quality_notes",
+        "simple_recommendations",
+    ],
 }
 
 
@@ -1037,6 +1072,372 @@ def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
         "top_frequencies": top_frequencies,
         "correlation_matrix": correlation_matrix,
     }
+
+
+def _find_ai_date_column(df: pd.DataFrame) -> tuple[str | None, pd.Series | None]:
+    for column in df.columns:
+        series = df[column]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return str(column), pd.to_datetime(series, errors="coerce")
+
+    for column in df.columns:
+        series = df[column]
+        if not _looks_like_date_column(str(column), series):
+            continue
+
+        parsed = pd.to_datetime(series, errors="coerce")
+        if len(parsed) and float(parsed.notna().mean()) >= 0.45:
+            return str(column), parsed
+
+    return None, None
+
+
+def _build_ai_trends(df: pd.DataFrame, numeric_summary: list[dict[str, object]]) -> dict[str, str]:
+    df = _get_user_visible_dataframe(df)
+    numeric_columns = [
+        str(summary["column"])
+        for summary in numeric_summary
+        if summary.get("column") in df.columns
+    ]
+    date_column, date_series = _find_ai_date_column(df)
+    trends: dict[str, str] = {}
+
+    for column in numeric_columns[:3]:
+        values = pd.to_numeric(df[column], errors="coerce")
+        trend_df = pd.DataFrame({"value": values})
+
+        if date_series is not None:
+            trend_df["date"] = date_series
+            trend_df = trend_df.dropna(subset=["value", "date"]).sort_values("date")
+        else:
+            trend_df = trend_df.dropna(subset=["value"])
+
+        if len(trend_df) < 2:
+            continue
+
+        window_size = max(1, min(10, len(trend_df) // 5 or 1))
+        first_average = float(trend_df["value"].head(window_size).mean())
+        last_average = float(trend_df["value"].tail(window_size).mean())
+        difference = last_average - first_average
+
+        if abs(difference) < 1e-9:
+            direction = "mostly flat"
+        else:
+            direction = "upward" if difference > 0 else "downward"
+
+        if first_average:
+            percent_change = (difference / abs(first_average)) * 100
+            change_note = f"latest values are {abs(percent_change):.1f}% {'higher' if percent_change > 0 else 'lower'} than the first values"
+        else:
+            change_note = f"changed from {first_average:.2f} to {last_average:.2f}"
+
+        if date_column:
+            trends[column] = f"{direction} trend across {date_column}; {change_note}"
+        else:
+            trends[column] = f"{direction} trend by row order; {change_note}"
+
+    return trends
+
+
+def _build_gemini_dataset_summary(
+    dataset: dict[str, object],
+    df: pd.DataFrame,
+    resolved_stage: str,
+) -> dict[str, object]:
+    visible_df = _get_user_visible_dataframe(df).replace([np.inf, -np.inf], np.nan)
+    analysis = _build_analysis(visible_df)
+    numeric_summary_items = analysis.get("numeric_summary", [])
+    numeric_summary: dict[str, dict[str, object]] = {}
+
+    if isinstance(numeric_summary_items, list):
+        for item in numeric_summary_items[:10]:
+            if not isinstance(item, dict) or not item.get("column"):
+                continue
+
+            column = str(item["column"])
+            numeric_summary[column] = {
+                "sum": item.get("sum"),
+                "avg": item.get("mean"),
+                "min": item.get("min"),
+                "max": item.get("max"),
+            }
+
+    categorical_summary: dict[str, dict[str, object]] = {}
+    top_frequencies = analysis.get("top_frequencies", [])
+    if isinstance(top_frequencies, list):
+        for item in top_frequencies[:8]:
+            if not isinstance(item, dict) or not item.get("column"):
+                continue
+
+            values = item.get("values") if isinstance(item.get("values"), list) else []
+            distribution = {
+                str(value.get("label")): int(value.get("count") or 0)
+                for value in values[:5]
+                if isinstance(value, dict) and value.get("label") is not None
+            }
+            categorical_summary[str(item["column"])] = {
+                "top": next(iter(distribution.keys()), None),
+                "distribution": distribution,
+            }
+
+    missing_by_column = [
+        {"column": str(column), "missing_values": int(count)}
+        for column, count in visible_df.isna().sum().sort_values(ascending=False).head(8).items()
+        if int(count) > 0
+    ]
+    cleaning_summary = dataset.get("cleaning_summary")
+    cleaning_summary = cleaning_summary if isinstance(cleaning_summary, dict) else {}
+
+    return _json_safe(
+        {
+            "dataset_name": dataset.get("filename") or "dataset",
+            "stage": resolved_stage,
+            "total_rows": int(visible_df.shape[0]),
+            "total_columns": int(visible_df.shape[1]),
+            "columns": [str(column) for column in visible_df.columns],
+            "numeric_summary": numeric_summary,
+            "categorical_summary": categorical_summary,
+            "trends": _build_ai_trends(visible_df, numeric_summary_items if isinstance(numeric_summary_items, list) else []),
+            "data_quality": {
+                "missing_values": int(visible_df.isna().sum().sum()) if visible_df.shape[1] else 0,
+                "missing_by_column": missing_by_column,
+                "duplicate_rows": int(visible_df.duplicated().sum()) if not visible_df.empty else 0,
+                "duplicates_removed": int(cleaning_summary.get("duplicates_removed") or 0),
+                "invalid_rows_removed": int(cleaning_summary.get("invalid_rows_removed") or 0),
+                "missing_values_filled": int(cleaning_summary.get("missing_values_filled") or 0),
+            },
+        }
+    )
+
+
+def _build_ai_summary_cache_key(summary: dict[str, object]) -> str:
+    summary_json = json.dumps(
+        {
+            "version": AI_INSIGHTS_CACHE_VERSION,
+            "summary": summary,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(summary_json.encode("utf-8")).hexdigest()
+
+
+def _build_gemini_prompt(summary: dict[str, object]) -> str:
+    dataset_name = summary.get("dataset_name") or "this dataset"
+    return (
+        f"You are a friendly data analyst explaining {dataset_name} to a non-technical user. "
+        "Analyze only the structured dataset summary below. Do not mention that you received a JSON summary, "
+        "do not show code, and do not output raw JSON inside any sentence.\n\n"
+        "Write polished, human-readable insights that sound like an analyst report. "
+        "Start by explaining what the dataset appears to be about based on its columns and summaries. "
+        "Use phrases like 'Based on this, we can conclude...' only when the data supports the conclusion. "
+        "Keep the tone clear, helpful, and specific to the dataset.\n\n"
+        "Return valid JSON that matches the provided schema. Each array must contain 2 to 4 complete sentences. "
+        "Every sentence must be plain language, not a fragment, and should include concrete column names or values when useful.\n\n"
+        f"Dataset summary:\n{json.dumps(summary, indent=2, ensure_ascii=False)}"
+    )
+
+
+def _post_gemini_generate_content(
+    model: str,
+    api_key: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        GEMINI_API_URL_TEMPLATE.format(model=model),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=35) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini could not generate insights right now. Try again later.",
+        ) from exc
+    except (TimeoutError, OSError, urllib.error.URLError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to reach Gemini API right now. Try again in a moment.",
+        ) from exc
+
+    try:
+        response_payload = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini returned an unreadable response. Try again later.",
+        ) from exc
+
+    if not isinstance(response_payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini returned an unreadable response. Try again later.",
+        )
+
+    return response_payload
+
+
+def _extract_gemini_text(payload: dict[str, object]) -> str:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+
+    first_candidate = candidates[0]
+    if not isinstance(first_candidate, dict):
+        return ""
+
+    content = first_candidate.get("content")
+    if not isinstance(content, dict):
+        return ""
+
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+
+    text_parts = [
+        str(part.get("text"))
+        for part in parts
+        if isinstance(part, dict) and part.get("text")
+    ]
+    return "\n".join(text_parts).strip()
+
+
+def _strip_json_fence(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _section_to_strings(value: object) -> list[str]:
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, (dict, list)):
+                nested_items = _section_to_strings(item)
+                items.extend(nested_items)
+                continue
+
+            text = _clean_ai_sentence(str(item))
+            if text:
+                items.append(text)
+        return items
+
+    if isinstance(value, dict):
+        items: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, list):
+                for nested_item in item:
+                    text = _clean_ai_sentence(str(nested_item))
+                    if text:
+                        items.append(f"{key}: {text}")
+            else:
+                text = _clean_ai_sentence(str(item))
+                if text:
+                    items.append(f"{key}: {text}")
+        return items
+
+    if isinstance(value, str):
+        lines = [
+            _clean_ai_sentence(re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line))
+            for line in value.splitlines()
+        ]
+        return [line for line in lines if line]
+
+    return []
+
+
+def _clean_ai_sentence(text: str) -> str:
+    cleaned = _strip_json_fence(str(text))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.strip("` \t\r\n")
+    return cleaned
+
+
+def _parse_jsonish_text(text: str) -> object:
+    cleaned = _strip_json_fence(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _get_case_insensitive_value(parsed: dict[str, object], *keys: str) -> object:
+    normalized_map = {
+        re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_"): value
+        for key, value in parsed.items()
+    }
+
+    for key in keys:
+        normalized_key = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+        if normalized_key in normalized_map:
+            return normalized_map[normalized_key]
+
+    return None
+
+
+def _parsed_object_to_insights(parsed: dict[str, object]) -> dict[str, list[str]]:
+    return {
+        "key_insights": _section_to_strings(
+            _get_case_insensitive_value(parsed, "key_insights", "key insights", "insights", "summary")
+        ),
+        "trends": _section_to_strings(_get_case_insensitive_value(parsed, "trends", "trend")),
+        "data_quality_notes": _section_to_strings(
+            _get_case_insensitive_value(parsed, "data_quality_notes", "data quality notes", "data_quality")
+        ),
+        "simple_recommendations": _section_to_strings(
+            _get_case_insensitive_value(
+                parsed,
+                "simple_recommendations",
+                "simple recommendations",
+                "recommendations",
+            )
+        ),
+    }
+
+
+def _normalize_gemini_insights(text: str) -> dict[str, list[str]]:
+    cleaned = _strip_json_fence(text)
+    parsed = _parse_jsonish_text(cleaned)
+
+    if isinstance(parsed, str):
+        nested_parsed = _parse_jsonish_text(parsed)
+        parsed = nested_parsed if nested_parsed else {"key_insights": [parsed]}
+
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    insights = _parsed_object_to_insights(parsed)
+
+    if (
+        len(insights["key_insights"]) == 1
+        and insights["key_insights"][0].lstrip().startswith("{")
+    ):
+        nested = _parse_jsonish_text(insights["key_insights"][0])
+        if isinstance(nested, dict):
+            nested_insights = _parsed_object_to_insights(nested)
+            if any(nested_insights.values()):
+                insights = nested_insights
+
+    if not any(insights.values()) and cleaned:
+        insights["key_insights"] = [_clean_ai_sentence(cleaned)]
+
+    return insights
 
 
 APEX_CHART_COLORS = [
@@ -2838,6 +3239,7 @@ def rename_dataset(dataset_id: str, payload: DatasetRenamePayload) -> dict[str, 
     dataset = _get_dataset(dataset_id)
     filename = _safe_display_filename(payload.filename)
     dataset["filename"] = filename
+    dataset.pop("ai_insights_cache", None)
 
     return {
         "dataset_id": dataset_id,
@@ -2859,6 +3261,7 @@ def update_raw_dataset(dataset_id: str, payload: DatasetUpdatePayload) -> dict[s
     dataset["raw"] = updated_df
     dataset["cleaned"] = None
     dataset["cleaning_summary"] = None
+    dataset.pop("ai_insights_cache", None)
 
     full_dataset = _build_full_dataset(updated_df)
 
@@ -2884,6 +3287,7 @@ def clean_dataset(dataset_id: str, payload: CleaningConfigPayload | None = None)
     cleaned_df, summary = _clean_dataframe(raw_df, _build_cleaning_config_from_payload(payload))
     dataset["cleaned"] = cleaned_df
     dataset["cleaning_summary"] = summary
+    dataset.pop("ai_insights_cache", None)
 
     return {
         "dataset_id": dataset_id,
@@ -2901,6 +3305,86 @@ def analyze_dataset(dataset_id: str, stage: str = "latest") -> dict[str, object]
         "dataset_id": dataset_id,
         "stage": resolved_stage,
         "analysis": _build_analysis(df),
+    }
+
+
+@app.post("/datasets/{dataset_id}/ai-insights")
+async def generate_dataset_ai_insights(
+    dataset_id: str,
+    stage: str = "latest",
+    refresh: bool = False,
+) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    df, resolved_stage = _select_dataframe(dataset, stage)
+    summary = _build_gemini_dataset_summary(dataset, df, resolved_stage)
+    cache_key = _build_ai_summary_cache_key(summary)
+    cache = dataset.setdefault("ai_insights_cache", {})
+
+    if not isinstance(cache, dict):
+        cache = {}
+        dataset["ai_insights_cache"] = cache
+
+    if not refresh and cache_key in cache:
+        cached_payload = cache[cache_key]
+        if isinstance(cached_payload, dict):
+            return {
+                "dataset_id": dataset_id,
+                "stage": resolved_stage,
+                "cached": True,
+                **cached_payload,
+            }
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini API key is not configured on the backend. Set GEMINI_API_KEY and restart the server.",
+        )
+
+    model = (os.getenv("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL).strip() or GEMINI_DEFAULT_MODEL
+    request_payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": _build_gemini_prompt(summary)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.25,
+            "maxOutputTokens": 1800,
+            "responseMimeType": "application/json",
+            "responseSchema": GEMINI_INSIGHTS_RESPONSE_SCHEMA,
+        },
+    }
+
+    response_payload = await asyncio.to_thread(
+        _post_gemini_generate_content,
+        model,
+        api_key,
+        request_payload,
+    )
+    gemini_text = _extract_gemini_text(response_payload)
+    insights = _normalize_gemini_insights(gemini_text)
+    if not any(insights.values()):
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini returned an empty insight response. Try again later.",
+        )
+
+    result = {
+        "source": "gemini",
+        "model": model,
+        "summary_hash": cache_key,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "insights": insights,
+    }
+    cache[cache_key] = result
+
+    return {
+        "dataset_id": dataset_id,
+        "stage": resolved_stage,
+        "cached": False,
+        **result,
     }
 
 

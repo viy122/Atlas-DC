@@ -5,7 +5,6 @@ import AnalysisPage from './pages/AnalysisPage'
 import CleaningPage from './pages/CleaningPage'
 import HomePage from './pages/HomePage'
 import ProfilingPage from './pages/ProfilingPage'
-import ReportsPage from './pages/ReportsPage'
 import UploadPage from './pages/UploadPage'
 import VisualizationPage from './pages/VisualizationPage'
 import './App.css'
@@ -25,11 +24,11 @@ function App() {
               <Route path="/cleaning" element={<CleaningPage />} />
               <Route path="/analysis" element={<AnalysisPage />} />
               <Route path="/visualization" element={<VisualizationPage />} />
-              <Route path="/reports" element={<ReportsPage />} />
 
               <Route path="/upload" element={<Navigate to="/dataset" replace />} />
               <Route path="/insights" element={<Navigate to="/analysis" replace />} />
               <Route path="/dashboard-builder" element={<Navigate to="/visualization" replace />} />
+              <Route path="/reports" element={<Navigate to="/analysis" replace />} />
 
               <Route path="*" element={<Navigate to="/dataset" replace />} />
             </Routes>

@@ -422,6 +422,25 @@ export function AtlasProvider({ children }) {
     [datasetId],
   )
 
+  const generateAiInsights = useCallback(
+    async ({ stage = 'latest', refresh = false } = {}) => {
+      if (!datasetId) {
+        throw new Error('No dataset available yet.')
+      }
+
+      const searchParams = new URLSearchParams({ stage })
+
+      if (refresh) {
+        searchParams.set('refresh', 'true')
+      }
+
+      return fetchJson(`/datasets/${datasetId}/ai-insights?${searchParams.toString()}`, {
+        method: 'POST',
+      })
+    },
+    [datasetId],
+  )
+
   useEffect(() => {
     const storedDatasetId = getStoredDatasetId()
     if (!storedDatasetId) {
@@ -534,6 +553,7 @@ export function AtlasProvider({ children }) {
     fetchComparison,
     downloadDataset,
     generateChartData,
+    generateAiInsights,
     clearError,
     resetWorkspace,
   }

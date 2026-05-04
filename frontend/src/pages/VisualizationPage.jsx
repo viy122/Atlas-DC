@@ -1,6 +1,6 @@
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'react-apexcharts'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
@@ -9,6 +9,7 @@ import { formatValue } from '../utils/formatters'
 
 const CHART_TYPE_OPTIONS = [
   { value: 'bar', label: 'Bar', icon: 'bar' },
+  { value: 'horizontal-bar', label: 'Horizontal Bar', icon: 'horizontal-bar' },
   { value: 'line', label: 'Line', icon: 'line' },
   { value: 'area', label: 'Area', icon: 'area' },
   { value: 'pie', label: 'Pie', icon: 'pie' },
@@ -41,14 +42,23 @@ const CANVAS_PALETTE = [
   '#16a34a',
   '#db2777',
 ]
+const CANVAS_ZOOM_OPTIONS = [
+  { value: 'fit', label: 'Fit' },
+  { value: '0.5', label: '50%' },
+  { value: '0.75', label: '75%' },
+  { value: '1', label: '100%' },
+]
+const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i
 
 const CANVAS_VISUAL_TYPES = [
   { value: 'bar', label: 'Bar chart', icon: 'bar', kind: 'chart' },
+  { value: 'horizontal-bar', label: 'Horizontal bar', icon: 'horizontal-bar', kind: 'chart' },
   { value: 'line', label: 'Line chart', icon: 'line', kind: 'chart' },
   { value: 'pie', label: 'Pie chart', icon: 'pie', kind: 'chart' },
   { value: 'donut', label: 'Donut chart', icon: 'donut', kind: 'chart' },
   { value: 'area', label: 'Area chart', icon: 'area', kind: 'chart' },
   { value: 'scatter', label: 'Scatter chart', icon: 'scatter', kind: 'chart' },
+  { value: 'histogram', label: 'Histogram', icon: 'histogram', kind: 'chart' },
   { value: 'kpi', label: 'KPI card', icon: 'kpi', kind: 'kpi' },
   { value: 'table', label: 'Table', icon: 'table', kind: 'table' },
   { value: 'text', label: 'Text box', icon: 'text', kind: 'text' },
@@ -84,6 +94,48 @@ function buildDefaultSettings(chart, columns, numericColumns) {
 
 function clampValue(value, min, max) {
   return Math.min(Math.max(value, min), max)
+}
+
+function normalizeNumber(value, fallback, min = -Infinity, max = Infinity) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return fallback
+  }
+
+  return clampValue(numericValue, min, max)
+}
+
+function normalizeHexColor(value, fallback = '#ffffff') {
+  return HEX_COLOR_PATTERN.test(String(value || '')) ? value : fallback
+}
+
+function normalizeStringField(value) {
+  return typeof value === 'string' ? value : ''
+}
+
+function normalizeStringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string') : []
+}
+
+function normalizeCanvasChartType(type, fallback = 'bar') {
+  return CHART_TYPE_OPTIONS.some((option) => option.value === type) ? type : fallback
+}
+
+function getChartTypeLabel(type) {
+  return CHART_TYPE_OPTIONS.find((option) => option.value === type)?.label || 'Chart'
+}
+
+function normalizeColumnToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+}
+
+function isIdentifierLikeField(fieldName) {
+  const normalized = normalizeColumnToken(fieldName)
+  return normalized === 'id'
+    || normalized.endsWith('_id')
+    || normalized.endsWith('id')
+    || normalized.includes('uuid')
+    || normalized.includes('identifier')
 }
 
 function getColumnType(column, columns = []) {
@@ -128,7 +180,7 @@ function getCanvasVisualTitle(visual) {
   }
 
   if (visual.kind === 'table') {
-    const columns = visual.fields?.values ?? []
+    const columns = Array.isArray(visual.fields?.values) ? visual.fields.values : []
     return columns.length ? `Table of ${columns.slice(0, 3).join(', ')}` : 'Data Table'
   }
 
@@ -136,6 +188,12 @@ function getCanvasVisualTitle(visual) {
   const aggregationLabel = getAggregationLabel(aggregation)
   const measure = getMeasureField(visual)
   const dimension = getDimensionField(visual)
+  const chartType = visual.settings?.chart_type || visual.type
+
+  if (chartType === 'histogram') {
+    const histogramField = dimension || measure
+    return histogramField ? `Distribution of ${histogramField}` : 'Histogram'
+  }
 
   if (measure && dimension) {
     return `${aggregationLabel} of ${measure} by ${dimension}`
@@ -150,6 +208,35 @@ function getCanvasVisualTitle(visual) {
   }
 
   return visual.settings?.title || getVisualDefaults(visual.type).title
+}
+
+function getDraggedFieldName(event) {
+  const transfer = event?.dataTransfer
+  if (!transfer || typeof transfer.getData !== 'function') {
+    return ''
+  }
+
+  try {
+    return transfer.getData('application/x-atlas-field') || transfer.getData('text/plain') || ''
+  } catch (error) {
+    console.warn('Unable to read dragged field.', error)
+    return ''
+  }
+}
+
+function didLeaveElement(event) {
+  const currentTarget = event?.currentTarget
+  const relatedTarget = event?.relatedTarget
+
+  if (!currentTarget || !relatedTarget) {
+    return true
+  }
+
+  try {
+    return !currentTarget.contains(relatedTarget)
+  } catch {
+    return true
+  }
 }
 
 function getFieldWellWarning(fieldName, acceptedTypes, columnProfiles) {
@@ -186,6 +273,14 @@ function getFieldWellsForVisual(visual) {
 
   if (visual.kind !== 'chart') {
     return []
+  }
+
+  if (chartType === 'histogram') {
+    return [
+      { field: 'x_axis', label: 'Value / Bins', acceptedTypes: ['numeric'], multiple: false },
+      { field: 'tooltip', label: 'Tooltip', acceptedTypes: ['any'], multiple: true },
+      { field: 'filters', label: 'Filters', acceptedTypes: ['any'], multiple: true },
+    ]
   }
 
   if (chartType === 'pie' || chartType === 'donut') {
@@ -225,32 +320,35 @@ function getFieldWellsForVisual(visual) {
   ]
 }
 
-function getVisualDefaults(type) {
-  if (type === 'kpi') {
+function getVisualDefaults(type = 'bar') {
+  const safeType = String(type || 'bar')
+
+  if (safeType === 'kpi') {
     return { width: 260, height: 150, title: 'KPI Card' }
   }
 
-  if (type === 'table') {
+  if (safeType === 'table') {
     return { width: 520, height: 280, title: 'Data Table' }
   }
 
-  if (type === 'text') {
+  if (safeType === 'text') {
     return { width: 300, height: 160, title: 'Text Box' }
   }
 
-  return { width: 420, height: 300, title: `${type.charAt(0).toUpperCase()}${type.slice(1)} Chart` }
+  return { width: 420, height: 300, title: getChartTypeLabel(safeType) }
 }
 
 function createCanvasVisual(type, index = 0) {
-  const visualType = CANVAS_VISUAL_TYPES.find((item) => item.value === type) ?? CANVAS_VISUAL_TYPES[0]
-  const defaults = getVisualDefaults(type)
+  const safeType = CANVAS_VISUAL_TYPES.some((item) => item.value === type) ? type : 'bar'
+  const visualType = CANVAS_VISUAL_TYPES.find((item) => item.value === safeType) ?? CANVAS_VISUAL_TYPES[0]
+  const defaults = getVisualDefaults(safeType)
   const isChart = visualType.kind === 'chart'
   const isKpi = visualType.kind === 'kpi'
 
   return {
     id: `canvas-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     kind: visualType.kind,
-    type,
+    type: safeType,
     x: 32 + (index % 5) * 34,
     y: 34 + (index % 5) * 30,
     width: defaults.width,
@@ -266,7 +364,7 @@ function createCanvasVisual(type, index = 0) {
       values: [],
     },
     settings: {
-      chart_type: isChart ? type : 'bar',
+      chart_type: isChart ? safeType : 'bar',
       aggregation: isKpi ? 'count' : 'count',
       title: defaults.title,
       titleTouched: false,
@@ -283,6 +381,220 @@ function createCanvasVisual(type, index = 0) {
     },
     content: 'Add your note here.',
   }
+}
+
+function normalizeCanvasVisual(rawVisual, index = 0) {
+  const fallbackKind = rawVisual?.kind || 'chart'
+  const rawType = rawVisual?.type || rawVisual?.settings?.chart_type || fallbackKind
+  const type = CANVAS_VISUAL_TYPES.some((item) => item.value === rawType) ? rawType : 'bar'
+  const visualType = CANVAS_VISUAL_TYPES.find((item) => item.value === type) ?? CANVAS_VISUAL_TYPES[0]
+  const defaults = createCanvasVisual(type, index)
+  const defaultColor = CANVAS_PALETTE[index % CANVAS_PALETTE.length]
+  const defaultSecondaryColor = CANVAS_PALETTE[(index + 1) % CANVAS_PALETTE.length]
+  const rawChartType = rawVisual?.settings?.chart_type || defaults.settings.chart_type
+  const chartType = visualType.kind === 'chart' ? normalizeCanvasChartType(rawChartType, defaults.settings.chart_type) : 'bar'
+
+  return {
+    ...defaults,
+    ...rawVisual,
+    id: rawVisual?.id || `canvas-${index}`,
+    kind: visualType.kind,
+    type,
+    x: normalizeNumber(rawVisual?.x, defaults.x, 0, CANVAS_SIZE.width - 120),
+    y: normalizeNumber(rawVisual?.y, defaults.y, 0, CANVAS_SIZE.height - 90),
+    width: normalizeNumber(rawVisual?.width, defaults.width, 160, CANVAS_SIZE.width),
+    height: normalizeNumber(rawVisual?.height, defaults.height, 110, CANVAS_SIZE.height),
+    fields: {
+      ...defaults.fields,
+      ...(rawVisual?.fields ?? {}),
+      x_axis: normalizeStringField(rawVisual?.fields?.x_axis),
+      y_axis: normalizeStringField(rawVisual?.fields?.y_axis),
+      legend: normalizeStringField(rawVisual?.fields?.legend),
+      label: normalizeStringField(rawVisual?.fields?.label),
+      filter: normalizeStringField(rawVisual?.fields?.filter),
+      tooltip: normalizeStringList(rawVisual?.fields?.tooltip),
+      filters: normalizeStringList(rawVisual?.fields?.filters),
+      values: normalizeStringList(rawVisual?.fields?.values),
+    },
+    settings: {
+      ...defaults.settings,
+      ...(rawVisual?.settings ?? {}),
+      chart_type: chartType,
+      aggregation: AGGREGATION_OPTIONS.some((option) => option.value === rawVisual?.settings?.aggregation)
+        ? rawVisual.settings.aggregation
+        : defaults.settings.aggregation,
+      titleTouched: Boolean(rawVisual?.settings?.titleTouched),
+      fontFamily: FONT_FAMILY_OPTIONS.some((option) => option.value === rawVisual?.settings?.fontFamily)
+        ? rawVisual.settings.fontFamily
+        : defaults.settings.fontFamily,
+      fontSize: normalizeNumber(rawVisual?.settings?.fontSize, defaults.settings.fontSize, 10, 48),
+      color: normalizeHexColor(rawVisual?.settings?.color, defaultColor),
+      secondaryColor: normalizeHexColor(rawVisual?.settings?.secondaryColor, defaultSecondaryColor),
+      backgroundColor: normalizeHexColor(rawVisual?.settings?.backgroundColor, '#ffffff'),
+      borderRadius: normalizeNumber(rawVisual?.settings?.borderRadius, defaults.settings.borderRadius, 0, 28),
+    },
+    content: typeof rawVisual?.content === 'string' ? rawVisual.content : defaults.content,
+  }
+}
+
+function updateCanvasVisualTitle(nextVisual) {
+  if (nextVisual.settings?.titleTouched) {
+    return nextVisual
+  }
+
+  return {
+    ...nextVisual,
+    settings: {
+      ...nextVisual.settings,
+      title: getCanvasVisualTitle(nextVisual),
+    },
+  }
+}
+
+function setCanvasField(visual, field, value, removeValue = false, multiple = false) {
+  const isArrayField = multiple || ['values', 'tooltip', 'filters'].includes(field)
+
+  if (isArrayField) {
+    const currentValues = Array.isArray(visual.fields?.[field]) ? visual.fields[field] : []
+    const nextValues = removeValue
+      ? currentValues.filter((fieldName) => fieldName !== value)
+      : multiple
+        ? [...new Set([...currentValues, value])]
+        : value
+          ? [value]
+          : []
+
+    return updateCanvasVisualTitle({
+      ...visual,
+      fields: {
+        ...visual.fields,
+        [field]: nextValues,
+      },
+    })
+  }
+
+  return updateCanvasVisualTitle({
+    ...visual,
+    fields: {
+      ...visual.fields,
+      [field]: removeValue ? '' : value,
+    },
+  })
+}
+
+function smartAssignFieldToVisual(visual, fieldName, columnProfiles, targetField = 'auto') {
+  const fieldType = getDisplayColumnType(fieldName, columnProfiles)
+  let nextVisual = visual
+  let resolvedTarget = targetField
+  let multiple = ['tooltip', 'filters'].includes(targetField)
+
+  if (targetField === 'auto') {
+    if (visual.kind === 'table') {
+      resolvedTarget = 'values'
+      multiple = true
+    } else if (visual.kind === 'kpi') {
+      if (fieldType === 'numeric') {
+        resolvedTarget = 'values'
+      } else if (!visual.fields?.label) {
+        resolvedTarget = 'label'
+      } else {
+        resolvedTarget = 'filters'
+        multiple = true
+      }
+    } else if (visual.kind === 'chart') {
+      const hasDimension = Boolean(visual.fields?.x_axis)
+      const hasMeasure = Boolean(visual.fields?.y_axis)
+
+      if (hasDimension && hasMeasure) {
+        resolvedTarget = visual.fields?.legend ? 'tooltip' : 'legend'
+        multiple = resolvedTarget === 'tooltip'
+      } else if (fieldType === 'numeric' && !hasMeasure) {
+        resolvedTarget = 'y_axis'
+      } else if (!hasDimension) {
+        resolvedTarget = 'x_axis'
+      } else if (!hasMeasure) {
+        resolvedTarget = 'y_axis'
+      } else {
+        resolvedTarget = 'legend'
+      }
+    } else {
+      resolvedTarget = 'filters'
+      multiple = true
+    }
+  }
+
+  if (resolvedTarget === 'values') {
+    multiple = visual.kind === 'table'
+  }
+
+  nextVisual = setCanvasField(nextVisual, resolvedTarget, fieldName, false, multiple)
+
+  if (
+    fieldType === 'numeric' &&
+    ['y_axis', 'values'].includes(resolvedTarget) &&
+    !isIdentifierLikeField(fieldName) &&
+    (!visual.settings?.aggregation || visual.settings.aggregation === 'count')
+  ) {
+    nextVisual = updateCanvasVisualTitle({
+      ...nextVisual,
+      settings: {
+        ...nextVisual.settings,
+        aggregation: 'sum',
+      },
+    })
+  }
+
+  return nextVisual
+}
+
+function createCanvasVisualFromField(fieldName, columnProfiles, numericColumns, index = 0) {
+  const fieldType = getDisplayColumnType(fieldName, columnProfiles)
+  const isIdentifierField = isIdentifierLikeField(fieldName)
+  const chartType = fieldType === 'numeric' && !isIdentifierField
+    ? 'kpi'
+    : fieldType === 'date' && numericColumns.length
+      ? 'line'
+      : 'bar'
+  let visual = createCanvasVisual(chartType, index)
+
+  if (fieldType === 'numeric' && !isIdentifierField) {
+    visual = setCanvasField(visual, 'values', fieldName)
+    visual = updateCanvasVisualTitle({
+      ...visual,
+      settings: {
+        ...visual.settings,
+        aggregation: 'sum',
+      },
+    })
+  } else if (fieldType === 'numeric') {
+    visual = setCanvasField(visual, 'x_axis', fieldName)
+  } else if (fieldType === 'date' && numericColumns.length) {
+    visual = setCanvasField(visual, 'x_axis', fieldName)
+    visual = setCanvasField(visual, 'y_axis', numericColumns[0])
+    visual = updateCanvasVisualTitle({
+      ...visual,
+      settings: {
+        ...visual.settings,
+        aggregation: 'sum',
+      },
+    })
+  } else {
+    visual = setCanvasField(visual, 'x_axis', fieldName)
+  }
+
+  return updateCanvasVisualTitle(visual)
+}
+
+function getFieldDropPreview(fieldName, columnProfiles, numericColumns, targetVisual = null, targetField = 'auto') {
+  if (!fieldName) {
+    return ''
+  }
+
+  const previewVisual = targetVisual
+    ? smartAssignFieldToVisual(targetVisual, fieldName, columnProfiles, targetField)
+    : createCanvasVisualFromField(fieldName, columnProfiles, numericColumns)
+
+  return getCanvasVisualTitle(previewVisual)
 }
 
 function formatCanvasLabel(value) {
@@ -322,15 +634,56 @@ function aggregateCanvasValues(values, aggregation) {
   return numericValues.length
 }
 
+function buildHistogramBuckets(values) {
+  const numericValues = values.map((value) => Number(value)).filter(Number.isFinite)
+  if (!numericValues.length) {
+    return { labels: [], values: [] }
+  }
+
+  const minValue = Math.min(...numericValues)
+  const maxValue = Math.max(...numericValues)
+  if (minValue === maxValue) {
+    return {
+      labels: [formatValue(minValue)],
+      values: [numericValues.length],
+    }
+  }
+
+  const bucketCount = clampValue(Math.ceil(Math.sqrt(numericValues.length)), 5, 12)
+  const bucketSize = (maxValue - minValue) / bucketCount
+  const buckets = Array.from({ length: bucketCount }, (_, index) => {
+    const start = minValue + index * bucketSize
+    const end = index === bucketCount - 1 ? maxValue : start + bucketSize
+    return {
+      start,
+      end,
+      count: 0,
+    }
+  })
+
+  for (const value of numericValues) {
+    const bucketIndex = value === maxValue
+      ? bucketCount - 1
+      : clampValue(Math.floor((value - minValue) / bucketSize), 0, bucketCount - 1)
+    buckets[bucketIndex].count += 1
+  }
+
+  return {
+    labels: buckets.map((bucket) => `${formatValue(Number(bucket.start.toFixed(2)))}-${formatValue(Number(bucket.end.toFixed(2)))}`),
+    values: buckets.map((bucket) => bucket.count),
+  }
+}
+
 function buildCanvasChart(visual, rows) {
   const chartType = visual.settings?.chart_type || visual.type || 'bar'
-  const apexType = chartType === 'histogram' ? 'bar' : chartType
+  const apexType = ['histogram', 'horizontal-bar'].includes(chartType) ? 'bar' : chartType
   const xAxis = visual.fields?.x_axis || ''
   const yAxis = visual.fields?.y_axis || ''
   const legendField = visual.fields?.legend || ''
   const aggregation = visual.settings?.aggregation || 'count'
   const title = getCanvasVisualTitle(visual)
   const subtitle = visual.settings?.subtitle || ''
+  const histogramAxis = chartType === 'histogram' ? xAxis || yAxis : ''
   const colors = [visual.settings?.color || CANVAS_PALETTE[0], visual.settings?.secondaryColor || CANVAS_PALETTE[1], ...CANVAS_PALETTE]
   const baseOptions = {
     chart: {
@@ -350,13 +703,23 @@ function buildCanvasChart(visual, rows) {
       labels: { colors: '#47564d' },
     },
     stroke: { curve: 'smooth', width: 3 },
+    plotOptions: {
+      line: { isSlopeChart: false },
+      bar: {},
+      pie: {},
+    },
     tooltip: { theme: 'light' },
     title: { text: '' },
     subtitle: { text: '' },
     noData: { text: 'Drag fields here to build this visual.' },
   }
 
-  if (!xAxis || !rows.length || (aggregation !== 'count' && !yAxis)) {
+  if (
+    (!xAxis && chartType !== 'histogram')
+    || (chartType === 'histogram' && !histogramAxis)
+    || !rows.length
+    || (aggregation !== 'count' && !yAxis && chartType !== 'histogram')
+  ) {
     return {
       id: visual.id,
       title,
@@ -368,6 +731,38 @@ function buildCanvasChart(visual, rows) {
       series: [],
       options: baseOptions,
       empty: true,
+    }
+  }
+
+  if (chartType === 'histogram') {
+    const histogram = buildHistogramBuckets(rows.map((row) => row[histogramAxis]))
+
+    return {
+      id: visual.id,
+      title,
+      description: subtitle || `Distribution of ${histogramAxis}.`,
+      type: 'bar',
+      chart_type: 'histogram',
+      x_axis: histogramAxis,
+      y_axis: '',
+      series: [{ name: 'Records', data: histogram.values }],
+      options: {
+        ...baseOptions,
+        plotOptions: {
+          ...(baseOptions.plotOptions ?? {}),
+          bar: {
+            borderRadius: 4,
+            columnWidth: '92%',
+          },
+        },
+        xaxis: {
+          type: 'category',
+          categories: histogram.labels,
+          labels: { style: { colors: '#718178' }, rotate: -35, trim: true },
+        },
+        yaxis: { labels: { style: { colors: '#718178' } } },
+      },
+      empty: histogram.values.length === 0,
     }
   }
 
@@ -456,6 +851,10 @@ function buildCanvasChart(visual, rows) {
     : []
 
   if (chartType === 'pie' || chartType === 'donut') {
+    const piePairs = labels
+      .map((label, index) => ({ label, value: values[index] }))
+      .filter((pair) => Number.isFinite(pair.value) && pair.value > 0)
+
     return {
       id: visual.id,
       title,
@@ -464,13 +863,17 @@ function buildCanvasChart(visual, rows) {
       chart_type: chartType,
       x_axis: xAxis,
       y_axis: yAxis,
-      series: values,
+      series: piePairs.map((pair) => pair.value),
       options: {
         ...baseOptions,
-        labels,
-        plotOptions: chartType === 'donut' ? { pie: { donut: { size: '62%' } } } : undefined,
+        labels: piePairs.map((pair) => pair.label),
+        stroke: { width: 1, colors: ['#ffffff'] },
+        plotOptions: {
+          ...baseOptions.plotOptions,
+          pie: chartType === 'donut' ? { donut: { size: '62%' } } : {},
+        },
       },
-      empty: values.length === 0,
+      empty: piePairs.length === 0,
     }
   }
 
@@ -496,6 +899,14 @@ function buildCanvasChart(visual, rows) {
       : [{ name: aggregation === 'count' ? 'Records' : yAxis || 'Value', data: values }],
     options: {
       ...baseOptions,
+      plotOptions: {
+        ...(baseOptions.plotOptions ?? {}),
+        bar: {
+          ...(baseOptions.plotOptions?.bar ?? {}),
+          horizontal: chartType === 'horizontal-bar',
+          borderRadius: 4,
+        },
+      },
       xaxis: {
         type: 'category',
         categories: labels,
@@ -507,16 +918,78 @@ function buildCanvasChart(visual, rows) {
   }
 }
 
+function buildSafeCanvasChart(visual, rows) {
+  try {
+    return buildCanvasChart(visual, Array.isArray(rows) ? rows : [])
+  } catch (error) {
+    console.error('Unable to render canvas chart.', error)
+    return {
+      id: visual?.id ?? 'canvas-chart',
+      title: visual ? getCanvasVisualTitle(visual) : 'Chart',
+      description: 'This visual could not be rendered. Try changing the assigned fields.',
+      type: 'bar',
+      chart_type: 'bar',
+      x_axis: '',
+      y_axis: '',
+      series: [],
+      options: {
+        chart: { toolbar: { show: false }, background: 'transparent' },
+        noData: { text: 'This visual could not be rendered.' },
+      },
+      empty: true,
+    }
+  }
+}
+
+function getSafeCanvasVisualFrame(visual) {
+  const defaults = getVisualDefaults(visual?.type)
+
+  return {
+    x: normalizeNumber(visual?.x, 0, 0, CANVAS_SIZE.width - 120),
+    y: normalizeNumber(visual?.y, 0, 0, CANVAS_SIZE.height - 90),
+    width: normalizeNumber(visual?.width, defaults.width, 160, CANVAS_SIZE.width),
+    height: normalizeNumber(visual?.height, defaults.height, 110, CANVAS_SIZE.height),
+  }
+}
+
+function getCanvasElementSize(canvasElement) {
+  const rect = canvasElement?.getBoundingClientRect?.()
+  const width = Math.max(CANVAS_SIZE.width, Math.round(rect?.width || canvasElement?.clientWidth || CANVAS_SIZE.width))
+  const height = Math.max(CANVAS_SIZE.height, Math.round(rect?.height || canvasElement?.clientHeight || CANVAS_SIZE.height))
+
+  return { width, height }
+}
+
+function getCanvasVisualRenderKey(visual) {
+  try {
+    return JSON.stringify({
+      id: visual?.id,
+      kind: visual?.kind,
+      type: visual?.type,
+      x: visual?.x,
+      y: visual?.y,
+      width: visual?.width,
+      height: visual?.height,
+      fields: visual?.fields,
+      settings: visual?.settings,
+      content: visual?.content,
+    })
+  } catch {
+    return `${visual?.id ?? 'visual'}:${visual?.kind ?? ''}:${visual?.type ?? ''}`
+  }
+}
+
 function computeCanvasKpi(visual, rows) {
+  const safeRows = Array.isArray(rows) ? rows : []
   const field = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
   const aggregation = visual.settings?.aggregation || 'count'
-  const values = field ? rows.map((row) => row[field]) : rows
+  const values = field ? safeRows.map((row) => row[field]) : safeRows
   const rawValue = aggregateCanvasValues(values, aggregation)
   const labelField = visual.fields?.label || ''
 
   return {
     label: getCanvasVisualTitle(visual),
-    value: formatValue(rawValue ?? rows.length),
+    value: formatValue(rawValue ?? safeRows.length),
     hint: visual.settings?.subtitle || (labelField ? `Filtered by ${labelField}` : field || 'Filtered rows'),
   }
 }
@@ -655,6 +1128,7 @@ function WorkspaceControlPanel({
   mode,
   widgetCount,
   isLoading,
+  statusText = '',
   showWidgetBar = true,
   onBlankWorkspace,
   onSuggestedWorkspace,
@@ -667,7 +1141,10 @@ function WorkspaceControlPanel({
       <header className="visual-section-title">
         <div>
           <h2>Workspace Sheet</h2>
-          <p>{mode === 'blank' ? `Blank sheet / ${widgetCount} widgets` : `Suggested sheet / ${widgetCount} widgets`}</p>
+          <p>
+            {mode === 'blank' ? `Blank sheet / ${widgetCount} widgets` : `Suggested sheet / ${widgetCount} widgets`}
+            {statusText ? ` / ${statusText}` : ''}
+          </p>
         </div>
         <div className="visual-workspace-actions">
           <button type="button" className="visual-secondary-button" onClick={onBlankWorkspace}>
@@ -1081,7 +1558,11 @@ function ChartCard({
         {chart?.empty ? (
           <div className="visual-chart-empty">{chart.description}</div>
         ) : (
-          <Chart options={options} series={series} type={apexType} height={210} width="100%" />
+          <ChartRenderErrorBoundary
+            resetKey={`${chart?.id}:${apexType}:${chart?.x_axis}:${chart?.y_axis}:${series.length}`}
+          >
+            <Chart options={options} series={series} type={apexType} height={210} width="100%" />
+          </ChartRenderErrorBoundary>
         )}
       </div>
 
@@ -1293,6 +1774,131 @@ function ActiveFilterChips({
   )
 }
 
+class CanvasBuilderErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Blank canvas builder crashed.', error, errorInfo)
+  }
+
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null })
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <section className="visual-error-banner visual-builder-error" role="alert">
+          <div>
+            <h2>Dashboard builder display issue</h2>
+            <p>One visual could not render, so the builder was paused instead of showing a blank page.</p>
+          </div>
+          {this.props.onReset ? (
+            <button type="button" className="visual-secondary-button" onClick={this.props.onReset}>
+              Reset blank sheet
+            </button>
+          ) : null}
+        </section>
+      )
+    }
+
+    return this.props.children
+  }
+}
+
+class ChartRenderErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Chart visual crashed.', error, errorInfo)
+  }
+
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null })
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="blank-visual-empty blank-visual-empty--error">
+          This chart could not render. Change the chart type or assigned fields.
+        </div>
+      )
+    }
+
+    return this.props.children
+  }
+}
+
+class CanvasVisualErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Canvas visual crashed.', error, errorInfo)
+  }
+
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null })
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      const visual = this.props.visual
+      const frame = getSafeCanvasVisualFrame(visual)
+      const visualStyle = {
+        width: frame.width,
+        height: frame.height,
+        transform: `translate(${frame.x}px, ${frame.y}px)`,
+      }
+
+      return (
+        <article className="blank-canvas-visual blank-canvas-visual--error" style={visualStyle}>
+          <header className="blank-visual-handle">
+            <span>visual</span>
+            {this.props.onRemove && visual?.id ? (
+              <button type="button" aria-label="Remove visual" onClick={() => this.props.onRemove(visual.id)}>
+                x
+              </button>
+            ) : null}
+          </header>
+          <div className="blank-visual-empty blank-visual-empty--error">
+            This visual could not render. Remove it or assign different fields.
+          </div>
+        </article>
+      )
+    }
+
+    return this.props.children
+  }
+}
+
 function CanvasChartVisual({
   visual,
   rows,
@@ -1300,7 +1906,8 @@ function CanvasChartVisual({
   filterState,
   onChartValueSelect,
 }) {
-  const chart = buildCanvasChart(visual, rows)
+  const chart = buildSafeCanvasChart(visual, rows)
+  const frame = getSafeCanvasVisualFrame(visual)
   const apexType = APEX_TYPES.has(chart?.type) ? chart.type : 'bar'
   const series = Array.isArray(chart?.series) ? chart.series : []
   const sourceOptions = chart?.options ?? {}
@@ -1346,7 +1953,16 @@ function CanvasChartVisual({
       intersect: true,
     },
   }
-  const chartHeight = Math.max(112, visual.height - (visual.settings?.caption ? 106 : 82))
+  const chartHeight = Math.max(112, frame.height - (visual.settings?.caption ? 106 : 82))
+  const chartRenderKey = JSON.stringify({
+    id: visual.id,
+    type: apexType,
+    chartType: chart?.chart_type,
+    xAxis: chart?.x_axis,
+    yAxis: chart?.y_axis,
+    labels: sourceOptions.labels ?? sourceOptions.xaxis?.categories ?? [],
+    series,
+  })
 
   if (isFilterableChart && ['line', 'area', 'scatter'].includes(apexType)) {
     const sourceMarkerSize = Number(sourceOptions.markers?.size ?? 4)
@@ -1357,7 +1973,7 @@ function CanvasChartVisual({
   }
 
   if (isFilterableChart && selectedPointIndex >= 0) {
-    const selectedColor = visual.settings?.color || '#0f766e'
+    const selectedColor = normalizeHexColor(visual.settings?.color, '#0f766e')
     const mutedColor = '#d7e0db'
 
     if (apexType === 'pie' || apexType === 'donut') {
@@ -1402,13 +2018,17 @@ function CanvasChartVisual({
       }
     >
       <div className="blank-visual-title">
-        <h3>{visual.settings?.title || chart.title}</h3>
+        <h3>{getCanvasVisualTitle(visual) || chart.title}</h3>
         {visual.settings?.subtitle ? <p>{visual.settings.subtitle}</p> : null}
       </div>
       {chart.empty ? (
         <div className="blank-visual-empty">{chart.description}</div>
       ) : (
-        <Chart options={options} series={series} type={apexType} height={chartHeight} width="100%" />
+        <ChartRenderErrorBoundary
+          resetKey={`${chartRenderKey}:${chartHeight}`}
+        >
+          <Chart key={chartRenderKey} options={options} series={series} type={apexType} height={chartHeight} width="100%" />
+        </ChartRenderErrorBoundary>
       )}
       {visual.settings?.caption ? <p className="blank-visual-caption">{visual.settings.caption}</p> : null}
     </div>
@@ -1429,8 +2049,8 @@ function CanvasKpiVisual({ visual, rows }) {
 }
 
 function CanvasTableVisual({ visual, rows }) {
-  const selectedColumns = visual.fields?.values?.length ? visual.fields.values : []
-  const visibleRows = rows.slice(0, 40)
+  const selectedColumns = Array.isArray(visual.fields?.values) && visual.fields.values.length ? visual.fields.values : []
+  const visibleRows = Array.isArray(rows) ? rows.slice(0, 40) : []
 
   return (
     <div className="blank-table-visual">
@@ -1482,30 +2102,71 @@ function CanvasVisual({
   rows,
   isSelected,
   isFinalized,
+  dragState,
+  isDropActive,
+  isDropPulse,
   filterMetadataByColumn,
   filterState,
   onSelect,
   onRemove,
   onDragStart,
   onResizeStart,
+  onFieldDragOver,
+  onFieldDragLeave,
+  onFieldDrop,
   onChartValueSelect,
 }) {
+  const isFieldDragging = Boolean(dragState?.field)
+  const showFieldDropOverlay = isFieldDragging && !isFinalized && ['chart', 'kpi', 'table'].includes(visual.kind)
+  const frame = getSafeCanvasVisualFrame(visual)
   const visualStyle = {
-    width: visual.width,
-    height: visual.height,
-    transform: `translate(${visual.x}px, ${visual.y}px)`,
-    backgroundColor: visual.settings?.backgroundColor || '#ffffff',
-    borderRadius: `${visual.settings?.borderRadius ?? 8}px`,
+    width: frame.width,
+    height: frame.height,
+    transform: `translate(${frame.x}px, ${frame.y}px)`,
+    backgroundColor: normalizeHexColor(visual.settings?.backgroundColor, '#ffffff'),
+    borderRadius: `${normalizeNumber(visual.settings?.borderRadius, 8, 0, 28)}px`,
     fontFamily: visual.settings?.fontFamily,
-    fontSize: `${visual.settings?.fontSize ?? 13}px`,
-    '--blank-accent': visual.settings?.color || '#0f766e',
+    fontSize: `${normalizeNumber(visual.settings?.fontSize, 13, 10, 48)}px`,
+    '--blank-accent': normalizeHexColor(visual.settings?.color, '#0f766e'),
   }
 
   return (
     <article
-      className={isSelected ? 'blank-canvas-visual blank-canvas-visual--selected' : 'blank-canvas-visual'}
+      className={
+        [
+          'blank-canvas-visual',
+          isSelected ? 'blank-canvas-visual--selected' : '',
+          isDropActive ? 'blank-canvas-visual--drop-active' : '',
+          isDropPulse ? 'blank-canvas-visual--drop-pulse' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+      }
       style={visualStyle}
       onPointerDown={() => onSelect(visual.id)}
+      onDragOver={(event) => {
+        if (!isFieldDragging) {
+          return
+        }
+
+        event.preventDefault()
+        event.stopPropagation()
+        onFieldDragOver(event, visual)
+      }}
+      onDragLeave={(event) => {
+        if (didLeaveElement(event)) {
+          onFieldDragLeave(visual.id)
+        }
+      }}
+      onDrop={(event) => {
+        if (!isFieldDragging) {
+          return
+        }
+
+        event.preventDefault()
+        event.stopPropagation()
+        onFieldDrop(event, visual)
+      }}
     >
       {!isFinalized ? (
         <header className="blank-visual-handle" onPointerDown={(event) => onDragStart(event, visual)}>
@@ -1536,6 +2197,65 @@ function CanvasVisual({
         {visual.kind === 'table' ? <CanvasTableVisual visual={visual} rows={rows} /> : null}
         {visual.kind === 'text' ? <CanvasTextVisual visual={visual} /> : null}
       </div>
+
+      {showFieldDropOverlay ? (
+        visual.kind === 'chart' ? (
+          <div className="blank-chart-drop-overlay">
+            <strong>Drop field to build this chart</strong>
+            <div className="blank-chart-drop-zones">
+              <div
+                className="blank-chart-drop-zone blank-chart-drop-zone--top"
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDragOver(event, visual, 'x_axis')
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDrop(event, visual, 'x_axis')
+                }}
+              >
+                Drop dimension (X-axis)
+              </div>
+              <div
+                className="blank-chart-drop-zone blank-chart-drop-zone--side"
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDragOver(event, visual, 'legend')
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDrop(event, visual, 'legend')
+                }}
+              >
+                Drop legend
+              </div>
+              <div
+                className="blank-chart-drop-zone blank-chart-drop-zone--bottom"
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDragOver(event, visual, 'y_axis')
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onFieldDrop(event, visual, 'y_axis')
+                }}
+              >
+                Drop measure (Y-axis)
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="blank-chart-drop-overlay blank-chart-drop-overlay--simple">
+            <strong>Drop field to build this visual</strong>
+          </div>
+        )
+      ) : null}
 
       {!isFinalized ? (
         <>
@@ -1580,7 +2300,7 @@ function FieldDropZone({
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault()
-        const fieldName = event.dataTransfer.getData('text/plain')
+        const fieldName = getDraggedFieldName(event)
         if (fieldName) {
           onDropField(fieldName)
         }
@@ -1596,7 +2316,12 @@ function FieldDropZone({
             <button
               type="button"
               key={`${label}-${fieldName}`}
-              onClick={() => onRemoveField(fieldName)}
+              onClick={(event) => {
+                event.stopPropagation()
+                onRemoveField(fieldName)
+              }}
+              title={`Remove ${fieldName}`}
+              aria-label={`Remove ${fieldName}`}
             >
               {fieldName} <small aria-hidden="true">x</small>
             </button>
@@ -1610,231 +2335,342 @@ function FieldDropZone({
   )
 }
 
+function BlankSidebarSection({ title, isOpen, onToggle, children }) {
+  return (
+    <section className={isOpen ? 'blank-sidebar-section' : 'blank-sidebar-section blank-sidebar-section--collapsed'}>
+      <button
+        type="button"
+        className="blank-sidebar-section-toggle"
+        onClick={onToggle}
+        aria-expanded={isOpen}
+      >
+        <span>{title}</span>
+        <small aria-hidden="true">{isOpen ? 'Collapse' : 'Open'}</small>
+      </button>
+      {isOpen ? <div className="blank-sidebar-section-body">{children}</div> : null}
+    </section>
+  )
+}
+
+function BlankSidePane({ title, isCollapsed, onToggleCollapse, className = '', children }) {
+  if (isCollapsed) {
+    return (
+      <aside className={`blank-builder-sidebar blank-builder-sidebar--side-collapsed ${className}`.trim()}>
+        <button
+          type="button"
+          className="blank-sidepane-tab"
+          onClick={onToggleCollapse}
+          aria-label={`Open ${title}`}
+          title={`Open ${title}`}
+        >
+          <span>{title}</span>
+        </button>
+      </aside>
+    )
+  }
+
+  return (
+    <aside className={`blank-builder-sidebar ${className}`.trim()} aria-label={title}>
+      <header className="blank-sidepane-header">
+        <h2>{title}</h2>
+        <button
+          type="button"
+          className="blank-sidepane-collapse-button"
+          onClick={onToggleCollapse}
+          aria-label={`Collapse ${title}`}
+          title={`Collapse ${title}`}
+        >
+          <span aria-hidden="true">&gt;</span>
+        </button>
+      </header>
+      {children}
+    </aside>
+  )
+}
+
 function BlankCanvasSidebar({
   columns,
   columnProfiles,
   selectedVisual,
   onAddVisual,
+  onFieldClick,
+  onFieldDragStart,
+  onFieldDragEnd,
   onUpdateField,
   onUpdateSetting,
   onUpdateContent,
   onRemoveVisual,
 }) {
+  const [openSections, setOpenSections] = useState({
+    visualizations: true,
+    fields: true,
+    settings: true,
+  })
+  const [collapsedPanes, setCollapsedPanes] = useState({
+    build: false,
+    settings: false,
+  })
   const fieldWells = selectedVisual ? getFieldWellsForVisual(selectedVisual) : []
   const selectedChartType = selectedVisual?.settings?.chart_type || selectedVisual?.type
+  const toggleSection = (section) => {
+    setOpenSections((previous) => ({
+      ...previous,
+      [section]: !previous[section],
+    }))
+  }
+  const togglePane = (pane) => {
+    setCollapsedPanes((previous) => ({
+      ...previous,
+      [pane]: !previous[pane],
+    }))
+  }
+  const sidePaneClassName = [
+    'blank-builder-sidepanes',
+    collapsedPanes.build ? 'blank-builder-sidepanes--build-collapsed' : '',
+    collapsedPanes.settings ? 'blank-builder-sidepanes--settings-collapsed' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   return (
-    <aside className="blank-builder-sidebar">
-      <section>
-        <h2>Visualizations</h2>
-        <div className="blank-visual-button-grid">
-          {CANVAS_VISUAL_TYPES.map((visualType) => (
-            <button
-              type="button"
-              key={`canvas-add-${visualType.value}`}
-              onClick={() => onAddVisual(visualType.value)}
-              title={visualType.label}
-              aria-label={visualType.label}
-            >
-              <ChartTypeIcon type={visualType.icon} />
-              <span>{visualType.label}</span>
-            </button>
-          ))}
-        </div>
-      </section>
+    <div className={sidePaneClassName}>
+      <BlankSidePane
+        title="Build"
+        className="blank-builder-sidebar--build"
+        isCollapsed={collapsedPanes.build}
+        onToggleCollapse={() => togglePane('build')}
+      >
+        <BlankSidebarSection
+          title="Visualizations"
+          isOpen={openSections.visualizations}
+          onToggle={() => toggleSection('visualizations')}
+        >
+          <div className="blank-visual-button-grid">
+            {CANVAS_VISUAL_TYPES.map((visualType) => (
+              <button
+                type="button"
+                key={`canvas-add-${visualType.value}`}
+                onClick={() => onAddVisual(visualType.value)}
+                title={visualType.label}
+                aria-label={visualType.label}
+              >
+                <ChartTypeIcon type={visualType.icon} />
+                <span>{visualType.label}</span>
+              </button>
+            ))}
+          </div>
+        </BlankSidebarSection>
 
-      <section>
-        <h2>Data Fields</h2>
-        <div className="blank-field-list">
-          {columns.map((column) => (
-            <button
-              type="button"
-              key={`canvas-field-${column}`}
-              draggable
-              onDragStart={(event) => event.dataTransfer.setData('text/plain', column)}
-            >
-              <span>{column}</span>
-              <small className={`blank-field-type blank-field-type--${getDisplayColumnType(column, columnProfiles)}`}>
-                {getDisplayColumnType(column, columnProfiles)}
-              </small>
-            </button>
-          ))}
-        </div>
-      </section>
+        <BlankSidebarSection
+          title="Data Fields"
+          isOpen={openSections.fields}
+          onToggle={() => toggleSection('fields')}
+        >
+          <div className="blank-field-list">
+            {columns.map((column) => (
+              <button
+                type="button"
+                key={`canvas-field-${column}`}
+                draggable
+                onClick={() => onFieldClick(column)}
+                onDragStart={(event) => onFieldDragStart(event, column)}
+                onDragEnd={onFieldDragEnd}
+                title={`Add ${column}`}
+                aria-label={`Add ${column}`}
+              >
+                <span>{column}</span>
+                <small className={`blank-field-type blank-field-type--${getDisplayColumnType(column, columnProfiles)}`}>
+                  {getDisplayColumnType(column, columnProfiles)}
+                </small>
+              </button>
+            ))}
+          </div>
+        </BlankSidebarSection>
+      </BlankSidePane>
 
-      <section>
-        <h2>Settings</h2>
-        {selectedVisual ? (
-          <div className="blank-settings-panel">
-            {selectedVisual.kind === 'chart' ? (
-              <div className="blank-settings-group">
-                <ChartTypeSelector
-                  value={selectedChartType}
-                  onChange={(value) => onUpdateSetting(selectedVisual.id, 'chart_type', value)}
-                />
+      <BlankSidePane
+        title="Settings"
+        className="blank-builder-sidebar--settings"
+        isCollapsed={collapsedPanes.settings}
+        onToggleCollapse={() => togglePane('settings')}
+      >
+        <BlankSidebarSection
+          title="Settings"
+          isOpen={openSections.settings}
+          onToggle={() => toggleSection('settings')}
+        >
+          {selectedVisual ? (
+            <div className="blank-settings-panel">
+              {selectedVisual.kind === 'chart' ? (
+                <div className="blank-settings-group">
+                  <ChartTypeSelector
+                    value={selectedChartType}
+                    onChange={(value) => onUpdateSetting(selectedVisual.id, 'chart_type', value)}
+                  />
+                </div>
+              ) : null}
+
+              <div className="blank-field-well-stack">
+                {fieldWells.map((well) => (
+                  <FieldDropZone
+                    key={`${selectedVisual.id}-${well.field}`}
+                    label={well.label}
+                    value={
+                      well.multiple
+                        ? selectedVisual.fields?.[well.field] ?? []
+                        : well.field === 'values'
+                          ? selectedVisual.fields?.values?.[0]
+                          : selectedVisual.fields?.[well.field]
+                    }
+                    multiple={well.multiple}
+                    acceptedTypes={well.acceptedTypes}
+                    columnProfiles={columnProfiles}
+                    onDropField={(fieldName) =>
+                      onUpdateField(selectedVisual.id, well.field, fieldName, false, well.multiple)
+                    }
+                    onRemoveField={(fieldName) =>
+                      onUpdateField(selectedVisual.id, well.field, fieldName, true, well.multiple)
+                    }
+                  />
+                ))}
               </div>
-            ) : null}
 
-            <div className="blank-field-well-stack">
-              {fieldWells.map((well) => (
-                <FieldDropZone
-                  key={`${selectedVisual.id}-${well.field}`}
-                  label={well.label}
-                  value={
-                    well.multiple
-                      ? selectedVisual.fields?.[well.field] ?? []
-                      : well.field === 'values'
-                        ? selectedVisual.fields?.values?.[0]
-                        : selectedVisual.fields?.[well.field]
-                  }
-                  multiple={well.multiple}
-                  acceptedTypes={well.acceptedTypes}
-                  columnProfiles={columnProfiles}
-                  onDropField={(fieldName) =>
-                    onUpdateField(selectedVisual.id, well.field, fieldName, false, well.multiple)
-                  }
-                  onRemoveField={(fieldName) =>
-                    onUpdateField(selectedVisual.id, well.field, fieldName, true, well.multiple)
-                  }
-                />
-              ))}
-            </div>
+              {['chart', 'kpi'].includes(selectedVisual.kind) ? (
+                <label>
+                  <span>Aggregation</span>
+                  <select
+                    value={selectedVisual.settings?.aggregation || 'count'}
+                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'aggregation', event.target.value)}
+                  >
+                    {AGGREGATION_OPTIONS.map((option) => (
+                      <option key={`canvas-agg-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
 
-            {['chart', 'kpi'].includes(selectedVisual.kind) ? (
               <label>
-                <span>Aggregation</span>
+                <span>Title</span>
+                <input
+                  type="text"
+                  value={getCanvasVisualTitle(selectedVisual)}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'title', event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Subtitle</span>
+                <input
+                  type="text"
+                  value={selectedVisual.settings?.subtitle ?? ''}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'subtitle', event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Caption</span>
+                <input
+                  type="text"
+                  value={selectedVisual.settings?.caption ?? ''}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'caption', event.target.value)}
+                />
+              </label>
+
+              {selectedVisual.kind === 'text' ? (
+                <label>
+                  <span>Text</span>
+                  <textarea
+                    value={selectedVisual.content ?? ''}
+                    onChange={(event) => onUpdateContent(selectedVisual.id, event.target.value)}
+                  />
+                </label>
+              ) : null}
+
+              <label>
+                <span>Font Family</span>
                 <select
-                  value={selectedVisual.settings?.aggregation || 'count'}
-                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'aggregation', event.target.value)}
+                  value={selectedVisual.settings?.fontFamily || FONT_FAMILY_OPTIONS[0].value}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontFamily', event.target.value)}
                 >
-                  {AGGREGATION_OPTIONS.map((option) => (
-                    <option key={`canvas-agg-${option.value}`} value={option.value}>
+                  {FONT_FAMILY_OPTIONS.map((option) => (
+                    <option key={`canvas-font-${option.value}`} value={option.value}>
                       {option.label}
                     </option>
                   ))}
                 </select>
               </label>
-            ) : null}
-
-            <label>
-              <span>Title</span>
-              <input
-                type="text"
-                value={getCanvasVisualTitle(selectedVisual)}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'title', event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Subtitle</span>
-              <input
-                type="text"
-                value={selectedVisual.settings?.subtitle ?? ''}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'subtitle', event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Caption</span>
-              <input
-                type="text"
-                value={selectedVisual.settings?.caption ?? ''}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'caption', event.target.value)}
-              />
-            </label>
-
-            {selectedVisual.kind === 'text' ? (
               <label>
-                <span>Text</span>
-                <textarea
-                  value={selectedVisual.content ?? ''}
-                  onChange={(event) => onUpdateContent(selectedVisual.id, event.target.value)}
-                />
-              </label>
-            ) : null}
-
-            <label>
-              <span>Font Family</span>
-              <select
-                value={selectedVisual.settings?.fontFamily || FONT_FAMILY_OPTIONS[0].value}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontFamily', event.target.value)}
-              >
-                {FONT_FAMILY_OPTIONS.map((option) => (
-                  <option key={`canvas-font-${option.value}`} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Font Size</span>
-              <input
-                type="number"
-                min="10"
-                max="48"
-                value={selectedVisual.settings?.fontSize ?? 13}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontSize', Number(event.target.value))}
-              />
-            </label>
-
-            <div className="blank-color-grid">
-              <label>
-                <span>Color</span>
+                <span>Font Size</span>
                 <input
-                  type="color"
-                  value={selectedVisual.settings?.color || CANVAS_PALETTE[0]}
-                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'color', event.target.value)}
+                  type="number"
+                  min="10"
+                  max="48"
+                  value={selectedVisual.settings?.fontSize ?? 13}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'fontSize', Number(event.target.value))}
                 />
               </label>
-              <label>
-                <span>Background</span>
-                <input
-                  type="color"
-                  value={selectedVisual.settings?.backgroundColor || '#ffffff'}
-                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'backgroundColor', event.target.value)}
-                />
-              </label>
-            </div>
 
-            {selectedVisual.kind === 'chart' ? (
-              <div className="blank-toggle-grid">
+              <div className="blank-color-grid">
                 <label>
+                  <span>Color</span>
                   <input
-                    type="checkbox"
-                    checked={Boolean(selectedVisual.settings?.showLegend)}
-                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLegend', event.target.checked)}
+                    type="color"
+                    value={normalizeHexColor(selectedVisual.settings?.color, CANVAS_PALETTE[0])}
+                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'color', event.target.value)}
                   />
-                  <span>Legend</span>
                 </label>
                 <label>
+                  <span>Background</span>
                   <input
-                    type="checkbox"
-                    checked={Boolean(selectedVisual.settings?.showLabels)}
-                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLabels', event.target.checked)}
+                    type="color"
+                    value={normalizeHexColor(selectedVisual.settings?.backgroundColor, '#ffffff')}
+                    onChange={(event) => onUpdateSetting(selectedVisual.id, 'backgroundColor', event.target.value)}
                   />
-                  <span>Labels</span>
                 </label>
               </div>
-            ) : null}
 
-            <label>
-              <span>Border Radius</span>
-              <input
-                type="number"
-                min="0"
-                max="28"
-                value={selectedVisual.settings?.borderRadius ?? 8}
-                onChange={(event) => onUpdateSetting(selectedVisual.id, 'borderRadius', Number(event.target.value))}
-              />
-            </label>
+              {selectedVisual.kind === 'chart' ? (
+                <div className="blank-toggle-grid">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selectedVisual.settings?.showLegend)}
+                      onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLegend', event.target.checked)}
+                    />
+                    <span>Legend</span>
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(selectedVisual.settings?.showLabels)}
+                      onChange={(event) => onUpdateSetting(selectedVisual.id, 'showLabels', event.target.checked)}
+                    />
+                    <span>Labels</span>
+                  </label>
+                </div>
+              ) : null}
 
-            <button type="button" className="visual-card-remove-button" onClick={() => onRemoveVisual(selectedVisual.id)}>
-              Remove Visual
-            </button>
-          </div>
-        ) : (
-          <p className="blank-sidebar-empty">No visual selected</p>
-        )}
-      </section>
-    </aside>
+              <label>
+                <span>Border Radius</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="28"
+                  value={selectedVisual.settings?.borderRadius ?? 8}
+                  onChange={(event) => onUpdateSetting(selectedVisual.id, 'borderRadius', Number(event.target.value))}
+                />
+              </label>
+
+              <button type="button" className="visual-card-remove-button" onClick={() => onRemoveVisual(selectedVisual.id)}>
+                Remove Visual
+              </button>
+            </div>
+          ) : (
+            <p className="blank-sidebar-empty">No visual selected</p>
+          )}
+        </BlankSidebarSection>
+      </BlankSidePane>
+    </div>
   )
 }
 
@@ -1844,6 +2680,9 @@ function BlankCanvasBuilder({
   visuals,
   selectedVisualId,
   isFinalized,
+  dragState,
+  activeDropVisualId,
+  dropPulseVisualId,
   rows,
   columns,
   columnProfiles,
@@ -1852,44 +2691,140 @@ function BlankCanvasBuilder({
   onSelectVisual,
   onAddVisual,
   onRemoveVisual,
+  onFieldClick,
+  onFieldDragStart,
+  onFieldDragEnd,
+  onCanvasFieldDragOver,
+  onCanvasFieldDrop,
   onUpdateField,
   onUpdateSetting,
   onUpdateContent,
   onDragStart,
   onResizeStart,
+  onVisualFieldDragOver,
+  onVisualFieldDragLeave,
+  onVisualFieldDrop,
   onCanvasBackgroundClick,
   onChartValueSelect,
 }) {
-  const selectedVisual = visuals.find((visual) => visual.id === selectedVisualId) ?? null
+  const viewportRef = useRef(null)
+  const [fitScale, setFitScale] = useState(1)
+  const [zoomMode, setZoomMode] = useState('fit')
+  const safeVisuals = Array.isArray(visuals)
+    ? visuals.map((visual, index) => normalizeCanvasVisual(visual, index))
+    : []
+  const selectedVisual = safeVisuals.find((visual) => visual.id === selectedVisualId) ?? null
+  const canvasScale = zoomMode === 'fit' ? fitScale : Number(zoomMode)
+  const normalizedCanvasScale = Number.isFinite(canvasScale) ? canvasScale : fitScale
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return undefined
+    }
+
+    function updateFitScale() {
+      const nextScale = clampValue((viewport.clientWidth || CANVAS_SIZE.width) / CANVAS_SIZE.width, 0.28, 1)
+      setFitScale(Number(nextScale.toFixed(3)))
+    }
+
+    updateFitScale()
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateFitScale)
+      return () => window.removeEventListener('resize', updateFitScale)
+    }
+
+    const resizeObserver = new ResizeObserver(updateFitScale)
+    resizeObserver.observe(viewport)
+    return () => resizeObserver.disconnect()
+  }, [])
 
   return (
     <div className="blank-builder-shell">
       <main className="blank-builder-main">
-        <div ref={captureRef} className="blank-report-capture">
-          <section
-            ref={canvasRef}
-            className="blank-report-canvas"
-            style={{ width: CANVAS_SIZE.width, height: CANVAS_SIZE.height }}
-            onPointerDown={onCanvasBackgroundClick}
-          >
-            {visuals.map((visual) => (
-              <CanvasVisual
-                key={visual.id}
-                visual={visual}
-                rows={rows}
-                isSelected={visual.id === selectedVisualId}
-                isFinalized={isFinalized}
-                filterMetadataByColumn={filterMetadataByColumn}
-                filterState={filterState}
-                onSelect={onSelectVisual}
-                onRemove={onRemoveVisual}
-                onDragStart={onDragStart}
-                onResizeStart={onResizeStart}
-                onChartValueSelect={onChartValueSelect}
-              />
+        <div className="blank-canvas-toolbar" aria-label="Canvas zoom">
+          <span>Canvas</span>
+          <div className="blank-canvas-zoom-control">
+            {CANVAS_ZOOM_OPTIONS.map((option) => (
+              <button
+                key={`canvas-zoom-${option.value}`}
+                type="button"
+                className={zoomMode === option.value ? 'is-active' : ''}
+                onClick={() => setZoomMode(option.value)}
+              >
+                {option.label}
+              </button>
             ))}
-            {!visuals.length ? <div className="blank-canvas-empty"><h3>Blank Canvas</h3></div> : null}
-          </section>
+          </div>
+        </div>
+
+        <div ref={viewportRef} className="blank-canvas-viewport">
+          <div
+            className="blank-canvas-stage"
+            style={{
+              width: CANVAS_SIZE.width * normalizedCanvasScale,
+              height: CANVAS_SIZE.height * normalizedCanvasScale,
+            }}
+          >
+            <div
+              ref={captureRef}
+              className="blank-report-capture"
+              style={{
+                width: CANVAS_SIZE.width,
+                height: CANVAS_SIZE.height,
+                transform: `scale(${normalizedCanvasScale})`,
+              }}
+            >
+              <section
+                ref={canvasRef}
+                className={
+                  dragState?.field && !activeDropVisualId
+                    ? 'blank-report-canvas blank-report-canvas--drop-active'
+                    : 'blank-report-canvas'
+                }
+                style={{ width: CANVAS_SIZE.width, height: CANVAS_SIZE.height }}
+                onPointerDown={onCanvasBackgroundClick}
+                onDragOver={onCanvasFieldDragOver}
+                onDrop={(event) => onCanvasFieldDrop(event, normalizedCanvasScale)}
+              >
+                {safeVisuals.map((visual, index) => (
+                  <CanvasVisualErrorBoundary
+                    key={visual.id || `visual-${index}`}
+                    visual={visual}
+                    onRemove={onRemoveVisual}
+                    resetKey={getCanvasVisualRenderKey(visual)}
+                  >
+                    <CanvasVisual
+                      visual={visual}
+                      rows={rows}
+                      isSelected={visual.id === selectedVisualId}
+                      isFinalized={isFinalized}
+                      dragState={dragState}
+                      isDropActive={visual.id === activeDropVisualId}
+                      isDropPulse={visual.id === dropPulseVisualId}
+                      filterMetadataByColumn={filterMetadataByColumn}
+                      filterState={filterState}
+                      onSelect={onSelectVisual}
+                      onRemove={onRemoveVisual}
+                      onDragStart={(event, selectedVisualForDrag) => onDragStart(event, selectedVisualForDrag, normalizedCanvasScale)}
+                      onResizeStart={(event, selectedVisualForResize, direction) => onResizeStart(event, selectedVisualForResize, direction, normalizedCanvasScale)}
+                      onFieldDragOver={onVisualFieldDragOver}
+                      onFieldDragLeave={onVisualFieldDragLeave}
+                      onFieldDrop={onVisualFieldDrop}
+                      onChartValueSelect={onChartValueSelect}
+                    />
+                  </CanvasVisualErrorBoundary>
+                ))}
+                {!safeVisuals.length ? (
+                  <div className="blank-canvas-empty">
+                    <h3>Blank Canvas</h3>
+                    <p>Choose a field or visual to start this sheet.</p>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          </div>
         </div>
       </main>
 
@@ -1899,11 +2834,22 @@ function BlankCanvasBuilder({
           columnProfiles={columnProfiles}
           selectedVisual={selectedVisual}
           onAddVisual={onAddVisual}
+          onFieldClick={(fieldName) => onFieldClick(fieldName, selectedVisual)}
+          onFieldDragStart={onFieldDragStart}
+          onFieldDragEnd={onFieldDragEnd}
           onUpdateField={onUpdateField}
           onUpdateSetting={onUpdateSetting}
           onUpdateContent={onUpdateContent}
           onRemoveVisual={onRemoveVisual}
         />
+      ) : null}
+      {dragState?.field ? (
+        <div
+          className="blank-drag-preview"
+          style={{ transform: `translate(${dragState.x + 14}px, ${dragState.y + 14}px)` }}
+        >
+          {dragState.preview || `Drop ${dragState.field}`}
+        </div>
       ) : null}
     </div>
   )
@@ -2168,6 +3114,9 @@ function VisualizationPage() {
   const [canvasVisuals, setCanvasVisuals] = useState([])
   const [selectedCanvasVisualId, setSelectedCanvasVisualId] = useState('')
   const [canvasInteraction, setCanvasInteraction] = useState(null)
+  const [canvasDragState, setCanvasDragState] = useState(null)
+  const [activeDropVisualId, setActiveDropVisualId] = useState('')
+  const [dropPulseVisualId, setDropPulseVisualId] = useState('')
   const [hydratedCanvasDatasetId, setHydratedCanvasDatasetId] = useState('')
   const [activeEditor, setActiveEditor] = useState(null)
   const [openChartMenuId, setOpenChartMenuId] = useState('')
@@ -2295,6 +3244,10 @@ function VisualizationPage() {
       })
   }, [filterMetadata, filterState])
   const hasActiveFilters = activeFilters.length > 0
+  const hasBlankCanvasWork = workspaceMode === 'blank' && canvasVisuals.length > 0
+  const shouldShowActiveFilters = hasDatasetPayload
+    && filterMetadata.length > 0
+    && (workspaceMode !== 'blank' || hasActiveFilters)
   const presentationKpis = isFinalized && finalizedDashboard?.kpis && !hasActiveFilters
     ? finalizedDashboard.kpis
     : visibleKpiCards
@@ -2363,7 +3316,7 @@ function VisualizationPage() {
         if (!cancelled) {
           const savedCanvasLayout = getSavedCanvasLayout(datasetId)
           const savedCanvasVisuals = Array.isArray(savedCanvasLayout?.visuals)
-            ? savedCanvasLayout.visuals
+            ? savedCanvasLayout.visuals.map((visual, index) => normalizeCanvasVisual(visual, index))
             : []
 
           setLocalDashboard(payload)
@@ -2381,6 +3334,9 @@ function VisualizationPage() {
           setCanvasVisuals(savedCanvasVisuals)
           setSelectedCanvasVisualId(savedCanvasVisuals[0]?.id ?? '')
           setCanvasInteraction(null)
+          setCanvasDragState(null)
+          setActiveDropVisualId('')
+          setDropPulseVisualId('')
           setHydratedCanvasDatasetId(datasetId)
           setIsFinalized(false)
           setFinalizedDashboard(null)
@@ -2501,8 +3457,11 @@ function VisualizationPage() {
 
     function handlePointerMove(event) {
       event.preventDefault()
-      const deltaX = event.clientX - canvasInteraction.startClientX
-      const deltaY = event.clientY - canvasInteraction.startClientY
+      const interactionScale = canvasInteraction.canvasScale || 1
+      const deltaX = (event.clientX - canvasInteraction.startClientX) / interactionScale
+      const deltaY = (event.clientY - canvasInteraction.startClientY) / interactionScale
+      const canvasWidth = canvasInteraction.canvasWidth ?? CANVAS_SIZE.width
+      const canvasHeight = canvasInteraction.canvasHeight ?? CANVAS_SIZE.height
 
       setCanvasVisuals((previous) =>
         previous.map((visual) => {
@@ -2513,8 +3472,8 @@ function VisualizationPage() {
           if (canvasInteraction.mode === 'move') {
             return {
               ...visual,
-              x: clampValue(canvasInteraction.startX + deltaX, 0, CANVAS_SIZE.width - visual.width),
-              y: clampValue(canvasInteraction.startY + deltaY, 0, CANVAS_SIZE.height - visual.height),
+              x: clampValue(canvasInteraction.startX + deltaX, 0, canvasWidth - visual.width),
+              y: clampValue(canvasInteraction.startY + deltaY, 0, canvasHeight - visual.height),
             }
           }
 
@@ -2524,10 +3483,10 @@ function VisualizationPage() {
           return {
             ...visual,
             width: shouldResizeWidth
-              ? clampValue(canvasInteraction.startWidth + deltaX, 180, CANVAS_SIZE.width - visual.x)
+              ? clampValue(canvasInteraction.startWidth + deltaX, 180, canvasWidth - visual.x)
               : visual.width,
             height: shouldResizeHeight
-              ? clampValue(canvasInteraction.startHeight + deltaY, 120, CANVAS_SIZE.height - visual.y)
+              ? clampValue(canvasInteraction.startHeight + deltaY, 120, canvasHeight - visual.y)
               : visual.height,
           }
         }),
@@ -2547,8 +3506,16 @@ function VisualizationPage() {
     }
   }, [canvasInteraction])
 
+  function confirmDiscardBlankWork(actionLabel) {
+    return window.confirm(`Discard the current blank sheet and ${actionLabel}?`)
+  }
+
   async function regenerateDashboard() {
     if (!hasDatasetPayload) {
+      return
+    }
+
+    if (hasBlankCanvasWork && !confirmDiscardBlankWork('regenerate the suggested dashboard')) {
       return
     }
 
@@ -2645,6 +3612,10 @@ function VisualizationPage() {
   }
 
   function createBlankWorkspace() {
+    if (hasBlankCanvasWork && !confirmDiscardBlankWork('start a new blank sheet')) {
+      return
+    }
+
     setWorkspaceMode('blank')
     setWorkspaceWidgets(BLANK_WORKSPACE_WIDGETS)
     setManualCharts([])
@@ -2660,6 +3631,9 @@ function VisualizationPage() {
     setCanvasVisuals([])
     setSelectedCanvasVisualId('')
     setCanvasInteraction(null)
+    setCanvasDragState(null)
+    setActiveDropVisualId('')
+    setDropPulseVisualId('')
     setHydratedCanvasDatasetId(datasetId)
     setIsFinalized(false)
     setFinalizedDashboard(null)
@@ -2671,6 +3645,10 @@ function VisualizationPage() {
   }
 
   function restoreSuggestedWorkspace() {
+    if (hasBlankCanvasWork && !confirmDiscardBlankWork('switch back to the suggested sheet')) {
+      return
+    }
+
     setWorkspaceMode('suggested')
     setWorkspaceWidgets(DEFAULT_WORKSPACE_WIDGETS)
     setManualCharts([])
@@ -2685,6 +3663,9 @@ function VisualizationPage() {
     setChartTextById({})
     setSelectedCanvasVisualId('')
     setCanvasInteraction(null)
+    setCanvasDragState(null)
+    setActiveDropVisualId('')
+    setDropPulseVisualId('')
     setIsFinalized(false)
     setFinalizedDashboard(null)
     setActiveEditor(null)
@@ -2698,6 +3679,147 @@ function VisualizationPage() {
     const visual = createCanvasVisual(type, canvasVisuals.length)
     setCanvasVisuals((previous) => [...previous, visual])
     setSelectedCanvasVisualId(visual.id)
+  }
+
+  function handleCanvasFieldClick(fieldName, selectedVisual = null) {
+    if (!fieldName) {
+      return
+    }
+
+    if (selectedVisual?.id && selectedVisual.kind !== 'text') {
+      setCanvasVisuals((previous) =>
+        previous.map((visual) =>
+          visual.id === selectedVisual.id
+            ? smartAssignFieldToVisual(visual, fieldName, columnProfiles)
+            : visual,
+        ),
+      )
+      setSelectedCanvasVisualId(selectedVisual.id)
+      pulseCanvasVisual(selectedVisual.id)
+      return
+    }
+
+    const visual = createCanvasVisualFromField(fieldName, columnProfiles, numericColumns, canvasVisuals.length)
+    setCanvasVisuals((previous) => [...previous, visual])
+    setSelectedCanvasVisualId(visual.id)
+    pulseCanvasVisual(visual.id)
+  }
+
+  function pulseCanvasVisual(visualId) {
+    setDropPulseVisualId(visualId)
+    window.setTimeout(() => {
+      setDropPulseVisualId((current) => (current === visualId ? '' : current))
+    }, 520)
+  }
+
+  function startCanvasFieldDrag(event, fieldName) {
+    const transfer = event?.dataTransfer
+    if (transfer && typeof transfer.setData === 'function') {
+      transfer.effectAllowed = 'copy'
+      transfer.setData('application/x-atlas-field', fieldName)
+      transfer.setData('text/plain', fieldName)
+    }
+
+    setCanvasDragState({
+      field: fieldName,
+      x: event?.clientX ?? 0,
+      y: event?.clientY ?? 0,
+      preview: getFieldDropPreview(fieldName, columnProfiles, numericColumns),
+    })
+  }
+
+  function endCanvasFieldDrag() {
+    setCanvasDragState(null)
+    setActiveDropVisualId('')
+  }
+
+  function updateCanvasDragPreview(event, targetVisual = null, targetField = 'auto') {
+    const fieldName = canvasDragState?.field || getDraggedFieldName(event)
+    if (!fieldName) {
+      return
+    }
+
+    setCanvasDragState({
+      field: fieldName,
+      x: event?.clientX ?? 0,
+      y: event?.clientY ?? 0,
+      preview: getFieldDropPreview(fieldName, columnProfiles, numericColumns, targetVisual, targetField),
+    })
+  }
+
+  function handleCanvasFieldDragOver(event) {
+    if (!canvasDragState?.field) {
+      return
+    }
+
+    event.preventDefault()
+    updateCanvasDragPreview(event)
+    setActiveDropVisualId('')
+  }
+
+  function handleCanvasFieldDrop(event, canvasScale = 1) {
+    const fieldName = canvasDragState?.field || getDraggedFieldName(event)
+    if (!fieldName) {
+      return
+    }
+
+    event.preventDefault()
+    const canvasRect = blankCanvasRef.current?.getBoundingClientRect?.()
+    if (!canvasRect) {
+      endCanvasFieldDrag()
+      return
+    }
+
+    const canvasSize = getCanvasElementSize(blankCanvasRef.current)
+    const nextVisual = createCanvasVisualFromField(fieldName, columnProfiles, numericColumns, canvasVisuals.length)
+    const safeScale = canvasScale || 1
+    const pointerX = ((event?.clientX ?? canvasRect.left) - canvasRect.left) / safeScale
+    const pointerY = ((event?.clientY ?? canvasRect.top) - canvasRect.top) / safeScale
+    const x = clampValue(pointerX - nextVisual.width / 2, 0, canvasSize.width - nextVisual.width)
+    const y = clampValue(pointerY - 32, 0, canvasSize.height - nextVisual.height)
+    const positionedVisual = {
+      ...nextVisual,
+      x,
+      y,
+    }
+
+    setCanvasVisuals((previous) => [...previous, positionedVisual])
+    setSelectedCanvasVisualId(positionedVisual.id)
+    pulseCanvasVisual(positionedVisual.id)
+    endCanvasFieldDrag()
+  }
+
+  function handleVisualFieldDragOver(event, visual, targetField = 'auto') {
+    if (!canvasDragState?.field) {
+      return
+    }
+
+    event.preventDefault()
+    updateCanvasDragPreview(event, visual, targetField)
+    setActiveDropVisualId(visual.id)
+  }
+
+  function handleVisualFieldDragLeave(visualId) {
+    setActiveDropVisualId((current) => (current === visualId ? '' : current))
+  }
+
+  function handleVisualFieldDrop(event, visual, targetField = 'auto') {
+    const fieldName = canvasDragState?.field || getDraggedFieldName(event)
+    if (!fieldName) {
+      return
+    }
+
+    event.preventDefault()
+    setCanvasVisuals((previous) =>
+      previous.map((item) =>
+        item.id === visual.id
+          ? smartAssignFieldToVisual(item, fieldName, columnProfiles, targetField)
+          : item,
+      ),
+    )
+    setSelectedCanvasVisualId(visual.id)
+    pulseCanvasVisual(visual.id)
+    endCanvasFieldDrag()
   }
 
   function removeCanvasVisual(visualId) {
@@ -2719,48 +3841,23 @@ function VisualizationPage() {
 
   function updateCanvasField(visualId, field, value, removeValue = false, multiple = false) {
     updateCanvasVisual(visualId, (visual) => {
-      const isArrayField = multiple || ['values', 'tooltip', 'filters'].includes(field)
+      let nextVisual = setCanvasField(visual, field, value, removeValue, multiple)
+      const fieldType = getDisplayColumnType(value, columnProfiles)
 
-      if (isArrayField) {
-        const currentValues = visual.fields?.[field] ?? []
-        const nextValues = removeValue
-          ? currentValues.filter((fieldName) => fieldName !== value)
-          : multiple
-            ? [...new Set([...currentValues, value])]
-            : value
-              ? [value]
-              : []
-        const nextVisual = {
-          ...visual,
-          fields: {
-            ...visual.fields,
-            [field]: nextValues,
-          },
-        }
-
-        if (!nextVisual.settings?.titleTouched) {
-          nextVisual.settings = {
+      if (
+        !removeValue &&
+        fieldType === 'numeric' &&
+        ['y_axis', 'values'].includes(field) &&
+        !isIdentifierLikeField(value) &&
+        (!visual.settings?.aggregation || visual.settings.aggregation === 'count')
+      ) {
+        nextVisual = updateCanvasVisualTitle({
+          ...nextVisual,
+          settings: {
             ...nextVisual.settings,
-            title: getCanvasVisualTitle(nextVisual),
-          }
-        }
-
-        return nextVisual
-      }
-
-      const nextVisual = {
-        ...visual,
-        fields: {
-          ...visual.fields,
-          [field]: value,
-        },
-      }
-
-      if (!nextVisual.settings?.titleTouched) {
-        nextVisual.settings = {
-          ...nextVisual.settings,
-          title: getCanvasVisualTitle(nextVisual),
-        }
+            aggregation: 'sum',
+          },
+        })
       }
 
       return nextVisual
@@ -2794,13 +3891,14 @@ function VisualizationPage() {
     updateCanvasVisual(visualId, { content: value })
   }
 
-  function startCanvasVisualDrag(event, visual) {
+  function startCanvasVisualDrag(event, visual, canvasScale = 1) {
     if (isFinalized) {
       return
     }
 
     event.preventDefault()
     event.stopPropagation()
+    const canvasSize = getCanvasElementSize(blankCanvasRef.current)
     setSelectedCanvasVisualId(visual.id)
     setCanvasInteraction({
       mode: 'move',
@@ -2809,16 +3907,20 @@ function VisualizationPage() {
       startClientY: event.clientY,
       startX: visual.x,
       startY: visual.y,
+      canvasWidth: canvasSize.width,
+      canvasHeight: canvasSize.height,
+      canvasScale,
     })
   }
 
-  function startCanvasVisualResize(event, visual, direction) {
+  function startCanvasVisualResize(event, visual, direction, canvasScale = 1) {
     if (isFinalized) {
       return
     }
 
     event.preventDefault()
     event.stopPropagation()
+    const canvasSize = getCanvasElementSize(blankCanvasRef.current)
     setSelectedCanvasVisualId(visual.id)
     setCanvasInteraction({
       mode: direction,
@@ -2827,6 +3929,9 @@ function VisualizationPage() {
       startClientY: event.clientY,
       startWidth: visual.width,
       startHeight: visual.height,
+      canvasWidth: canvasSize.width,
+      canvasHeight: canvasSize.height,
+      canvasScale,
     })
   }
 
@@ -2969,8 +4074,15 @@ function VisualizationPage() {
     setManualCharts(savedDashboard.manualCharts ?? [])
     setCustomKpis(savedDashboard.customKpis ?? [])
     setCustomNotes(savedDashboard.notes ?? [])
-    setCanvasVisuals(savedDashboard.canvasVisuals ?? [])
-    setSelectedCanvasVisualId(savedDashboard.canvasVisuals?.[0]?.id ?? '')
+    const savedCanvasVisuals = Array.isArray(savedDashboard.canvasVisuals)
+      ? savedDashboard.canvasVisuals.map((visual, index) => normalizeCanvasVisual(visual, index))
+      : []
+
+    setCanvasVisuals(savedCanvasVisuals)
+    setSelectedCanvasVisualId(savedCanvasVisuals[0]?.id ?? '')
+    setCanvasDragState(null)
+    setActiveDropVisualId('')
+    setDropPulseVisualId('')
     setHydratedCanvasDatasetId(datasetId)
     setCustomChartsById(savedDashboard.customChartsById ?? {})
     setHiddenChartIds(savedDashboard.hiddenChartIds ?? [])
@@ -3266,6 +4378,7 @@ function VisualizationPage() {
           mode={workspaceMode}
           widgetCount={workspaceWidgetCount}
           isLoading={isLoading}
+          statusText={workspaceMode === 'blank' ? 'Autosaved locally' : ''}
           showWidgetBar={workspaceMode !== 'blank'}
           onBlankWorkspace={createBlankWorkspace}
           onSuggestedWorkspace={restoreSuggestedWorkspace}
@@ -3275,7 +4388,7 @@ function VisualizationPage() {
         />
       ) : null}
 
-      {hasDatasetPayload && filterMetadata.length ? (
+      {shouldShowActiveFilters ? (
         <ActiveFilterChips
           activeFilters={activeFilters}
           disabled={isFiltering}
@@ -3285,28 +4398,44 @@ function VisualizationPage() {
       ) : null}
 
       {workspaceMode === 'blank' ? (
-        <BlankCanvasBuilder
-          captureRef={dashboardCaptureRef}
-          canvasRef={blankCanvasRef}
-          visuals={canvasVisuals}
-          selectedVisualId={selectedCanvasVisualId}
-          isFinalized={isFinalized}
-          rows={tableRows}
-          columns={tableColumns}
-          columnProfiles={columnProfiles}
-          filterMetadataByColumn={filterMetadataByColumn}
-          filterState={filterState}
-          onSelectVisual={setSelectedCanvasVisualId}
-          onAddVisual={addCanvasVisual}
-          onRemoveVisual={removeCanvasVisual}
-          onUpdateField={updateCanvasField}
-          onUpdateSetting={updateCanvasSetting}
-          onUpdateContent={updateCanvasContent}
-          onDragStart={startCanvasVisualDrag}
-          onResizeStart={startCanvasVisualResize}
-          onCanvasBackgroundClick={handleCanvasBackgroundClick}
-          onChartValueSelect={updateChartDrivenFilter}
-        />
+        <CanvasBuilderErrorBoundary
+          resetKey={`${datasetId}:${workspaceMode}:${canvasVisuals.length}:${selectedCanvasVisualId}`}
+          onReset={createBlankWorkspace}
+        >
+          <BlankCanvasBuilder
+            captureRef={dashboardCaptureRef}
+            canvasRef={blankCanvasRef}
+            visuals={canvasVisuals}
+            selectedVisualId={selectedCanvasVisualId}
+            isFinalized={isFinalized}
+            dragState={canvasDragState}
+            activeDropVisualId={activeDropVisualId}
+            dropPulseVisualId={dropPulseVisualId}
+            rows={tableRows}
+            columns={tableColumns}
+            columnProfiles={columnProfiles}
+            filterMetadataByColumn={filterMetadataByColumn}
+            filterState={filterState}
+            onSelectVisual={setSelectedCanvasVisualId}
+            onAddVisual={addCanvasVisual}
+            onRemoveVisual={removeCanvasVisual}
+            onFieldClick={handleCanvasFieldClick}
+            onFieldDragStart={startCanvasFieldDrag}
+            onFieldDragEnd={endCanvasFieldDrag}
+            onCanvasFieldDragOver={handleCanvasFieldDragOver}
+            onCanvasFieldDrop={handleCanvasFieldDrop}
+            onUpdateField={updateCanvasField}
+            onUpdateSetting={updateCanvasSetting}
+            onUpdateContent={updateCanvasContent}
+            onDragStart={startCanvasVisualDrag}
+            onResizeStart={startCanvasVisualResize}
+            onVisualFieldDragOver={handleVisualFieldDragOver}
+            onVisualFieldDragLeave={handleVisualFieldDragLeave}
+            onVisualFieldDrop={handleVisualFieldDrop}
+            onCanvasBackgroundClick={handleCanvasBackgroundClick}
+            onChartValueSelect={updateChartDrivenFilter}
+          />
+        </CanvasBuilderErrorBoundary>
       ) : (
       <div ref={dashboardCaptureRef} className="visual-dashboard-capture">
         {presentationKpis.length > 0 ? (
