@@ -4791,6 +4791,36 @@ table tbody tr:hover td {
   line-height: 1.05;
 }
 
+.blank-kpi-ranked-list {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.blank-kpi-ranked-list li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.blank-kpi-ranked-list li span {
+  color: var(--visual-text);
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-transform: none;
+}
+
+.blank-kpi-ranked-list li strong {
+  font-size: 0.88rem;
+  line-height: 1.1;
+  text-align: right;
+}
+
 .blank-kpi-visual small,
 .blank-kpi-visual p {
   min-width: 0;
@@ -5302,6 +5332,18 @@ table tbody tr:hover td {
 .blank-settings-panel textarea {
   min-height: 72px;
   resize: vertical;
+}
+
+.blank-settings-error {
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.35;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
 }
 
 .blank-field-dropzone {

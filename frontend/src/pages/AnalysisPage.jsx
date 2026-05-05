@@ -113,6 +113,64 @@ function normalizeAiItems(items) {
   return items.map((item) => String(item).trim()).filter(Boolean)
 }
 
+function parseJsonishText(text) {
+  const cleaned = String(text || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
+
+  if (!cleaned) {
+    return null
+  }
+
+  try {
+    return JSON.parse(cleaned)
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/)
+    if (!match) {
+      return null
+    }
+
+    try {
+      return JSON.parse(match[0])
+    } catch {
+      return null
+    }
+  }
+}
+
+function normalizeAiInsights(insights) {
+  if (!insights || typeof insights !== 'object') {
+    return null
+  }
+
+  const normalized = Object.fromEntries(
+    AI_INSIGHT_SECTIONS.map(({ key }) => [key, normalizeAiItems(insights[key])]),
+  )
+
+  for (const { key } of AI_INSIGHT_SECTIONS) {
+    if (normalized[key].length !== 1 || !normalized[key][0].startsWith('{')) {
+      continue
+    }
+
+    const parsed = parseJsonishText(normalized[key][0])
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      continue
+    }
+
+    const parsedSections = Object.fromEntries(
+      AI_INSIGHT_SECTIONS.map((section) => [section.key, normalizeAiItems(parsed[section.key])]),
+    )
+
+    if (AI_INSIGHT_SECTIONS.some((section) => parsedSections[section.key].length > 0)) {
+      return parsedSections
+    }
+  }
+
+  return normalized
+}
+
 function normalizeAiErrorMessage(message) {
   return String(message || '').replaceAll(/Gemini/gi, 'AI')
 }
@@ -213,7 +271,7 @@ function AnalysisPage() {
   const bestCategory = topFrequencies[0]?.values?.[0]
   const chartCount = charts?.chart_configs?.length ?? charts?.charts?.length ?? 0
   const cleaningSteps = cleaningSummary?.cleaning_steps ?? []
-  const aiInsights = currentAiPayload?.insights ?? null
+  const aiInsights = normalizeAiInsights(currentAiPayload?.insights)
   const hasAiInsights = AI_INSIGHT_SECTIONS.some(({ key }) => normalizeAiItems(aiInsights?.[key]).length > 0)
   const recommendations = [
     missingTotal > 0

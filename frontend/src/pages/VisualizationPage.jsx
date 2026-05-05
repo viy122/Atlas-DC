@@ -50,8 +50,19 @@ const DATE_GROUP_OPTIONS = [
 
 const KPI_MODE_OPTIONS = [
   { value: 'overall', label: 'Overall' },
-  { value: 'highest', label: 'Highest group' },
-  { value: 'lowest', label: 'Lowest group' },
+  { value: 'topEntity', label: 'Top Entity' },
+]
+
+const KPI_SORT_ORDER_OPTIONS = [
+  { value: 'descending', label: 'Descending' },
+  { value: 'ascending', label: 'Ascending' },
+]
+
+const KPI_DATE_FILTER_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'today', label: 'Today' },
+  { value: 'last-7-days', label: 'Last 7 days' },
+  { value: 'last-30-days', label: 'Last 30 days' },
 ]
 
 const APEX_TYPES = new Set(['line', 'area', 'bar', 'pie', 'donut', 'scatter'])
@@ -125,7 +136,24 @@ function normalizeDateGrouping(value) {
 }
 
 function normalizeKpiMode(value) {
+  if (value === 'highest' || value === 'lowest') {
+    return 'topEntity'
+  }
+
   return KPI_MODE_OPTIONS.some((option) => option.value === value) ? value : 'overall'
+}
+
+function normalizeKpiSortOrder(value) {
+  return KPI_SORT_ORDER_OPTIONS.some((option) => option.value === value) ? value : 'descending'
+}
+
+function normalizeKpiTopN(value) {
+  const numericValue = Math.floor(Number(value))
+  return Number.isFinite(numericValue) ? clampValue(numericValue, 1, 50) : 1
+}
+
+function normalizeKpiDateFilter(value) {
+  return KPI_DATE_FILTER_OPTIONS.some((option) => option.value === value) ? value : 'all'
 }
 
 function buildDefaultSettings(chart, columns, numericColumns) {
@@ -230,6 +258,79 @@ function getKpiGroupColumns(columns = [], columnProfiles = []) {
   return columns.filter((column) => ['categorical', 'date'].includes(getDisplayColumnType(column, columnProfiles)))
 }
 
+function getKpiMetricOptions(columns = [], columnProfiles = [], aggregation = 'count') {
+  if (normalizeAggregation(aggregation) === 'count') {
+    return columns
+  }
+
+  return getKpiMetricColumns(columns, columnProfiles)
+}
+
+function getKpiDateColumns(columns = [], columnProfiles = []) {
+  return columns.filter((column) => {
+    const normalizedColumn = normalizeColumnToken(column)
+    return getDisplayColumnType(column, columnProfiles) === 'date'
+      || normalizedColumn === 'date'
+      || /(date|time|day|month|year)/.test(normalizedColumn)
+  })
+}
+
+function isNumericAggregation(aggregation) {
+  return ['sum', 'average', 'min', 'max'].includes(normalizeAggregation(aggregation))
+}
+
+function getKpiGroupField(visual) {
+  return visual?.settings?.groupBy || visual?.fields?.label || ''
+}
+
+function humanizeFieldName(fieldName, { stripNameSuffix = false } = {}) {
+  const label = String(fieldName || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!label) {
+    return ''
+  }
+
+  const normalizedLabel = stripNameSuffix ? label.replace(/\s+name$/i, '') : label
+
+  return normalizedLabel
+    .split(' ')
+    .map((word) => (word ? `${word.charAt(0).toUpperCase()}${word.slice(1)}` : word))
+    .join(' ')
+}
+
+function pluralizeKpiLabel(label) {
+  if (!label) {
+    return 'Entities'
+  }
+
+  if (/s$/i.test(label)) {
+    return label
+  }
+
+  if (/y$/i.test(label)) {
+    return `${label.slice(0, -1)}ies`
+  }
+
+  return `${label}s`
+}
+
+function getKpiMetricTitleLabel(metricField) {
+  return metricField ? humanizeFieldName(metricField) : 'records'
+}
+
+function getKpiEntityTitleLabel(groupField, topN = 1) {
+  const label = humanizeFieldName(groupField, { stripNameSuffix: true }) || 'Entity'
+  return topN > 1 ? pluralizeKpiLabel(label) : label
+}
+
+function getKpiDateFilterLabel(dateFilter) {
+  return KPI_DATE_FILTER_OPTIONS.find((option) => option.value === normalizeKpiDateFilter(dateFilter))?.label || 'All'
+}
+
 function getAggregationLabel(aggregation) {
   const option = AGGREGATION_OPTIONS.find((item) => item.value === aggregation)
   return option?.label || 'Count'
@@ -265,14 +366,15 @@ function getCanvasVisualTitle(visual) {
 
   if (visual.kind === 'kpi') {
     const kpiMode = normalizeKpiMode(visual.settings?.kpiMode)
-    const measureLabel = measure || 'records'
+    const measureLabel = getKpiMetricTitleLabel(measure)
 
-    if (kpiMode === 'highest' && dimension) {
-      return `Highest ${dimension}`
-    }
+    if (kpiMode === 'topEntity') {
+      const groupField = getKpiGroupField(visual)
+      const topN = normalizeKpiTopN(visual.settings?.top_n)
+      const entityLabel = getKpiEntityTitleLabel(groupField, topN)
+      const topLabel = topN > 1 ? `Top ${topN} ${entityLabel}` : `Top ${entityLabel}`
 
-    if (kpiMode === 'lowest' && dimension) {
-      return `Lowest ${dimension}`
+      return `${topLabel} by ${aggregationLabel} of ${measureLabel}`
     }
 
     if (measure) {
@@ -351,7 +453,7 @@ function getFieldWellsForVisual(visual) {
   if (visual.kind === 'kpi') {
     return [
       { field: 'values', label: 'Value / Measure', acceptedTypes: ['numeric'], multiple: false },
-      { field: 'label', label: 'Label / Optional Dimension', acceptedTypes: ['categorical', 'date'], multiple: false },
+      { field: 'label', label: 'Group By', acceptedTypes: ['categorical', 'date'], multiple: false },
       { field: 'filters', label: 'Filter', acceptedTypes: ['any'], multiple: true },
     ]
   }
@@ -459,6 +561,11 @@ function createCanvasVisual(type, index = 0) {
       chart_type: isChart ? safeType : 'bar',
       aggregation: isKpi ? 'count' : 'count',
       kpiMode: 'overall',
+      groupBy: '',
+      sort_order: isKpi ? 'descending' : 'source',
+      top_n: isKpi ? 1 : '',
+      dateFilter: 'all',
+      dateField: '',
       title: defaults.title,
       titleTouched: false,
       subtitle: '',
@@ -486,6 +593,10 @@ function normalizeCanvasVisual(rawVisual, index = 0) {
   const defaultSecondaryColor = CANVAS_PALETTE[(index + 1) % CANVAS_PALETTE.length]
   const rawChartType = rawVisual?.settings?.chart_type || defaults.settings.chart_type
   const chartType = visualType.kind === 'chart' ? normalizeCanvasChartType(rawChartType, defaults.settings.chart_type) : 'bar'
+  const rawKpiMode = rawVisual?.settings?.kpiMode
+  const legacyKpiSortOrder = rawKpiMode === 'lowest' ? 'ascending' : 'descending'
+  const isKpi = visualType.kind === 'kpi'
+  const kpiGroupBy = normalizeStringField(rawVisual?.settings?.groupBy || rawVisual?.fields?.label)
 
   return {
     ...defaults,
@@ -503,7 +614,9 @@ function normalizeCanvasVisual(rawVisual, index = 0) {
       x_axis: normalizeStringField(rawVisual?.fields?.x_axis),
       y_axis: normalizeStringField(rawVisual?.fields?.y_axis),
       legend: normalizeStringField(rawVisual?.fields?.legend),
-      label: normalizeStringField(rawVisual?.fields?.label),
+      label: isKpi
+        ? normalizeStringField(rawVisual?.fields?.label || rawVisual?.settings?.groupBy)
+        : normalizeStringField(rawVisual?.fields?.label),
       filter: normalizeStringField(rawVisual?.fields?.filter),
       tooltip: normalizeStringList(rawVisual?.fields?.tooltip),
       filters: normalizeStringList(rawVisual?.fields?.filters),
@@ -516,7 +629,20 @@ function normalizeCanvasVisual(rawVisual, index = 0) {
       aggregation: AGGREGATION_OPTIONS.some((option) => option.value === rawVisual?.settings?.aggregation)
         ? rawVisual.settings.aggregation
         : defaults.settings.aggregation,
-      kpiMode: normalizeKpiMode(rawVisual?.settings?.kpiMode),
+      kpiMode: normalizeKpiMode(rawKpiMode),
+      groupBy: isKpi ? kpiGroupBy : normalizeStringField(rawVisual?.settings?.groupBy),
+      sort_order: isKpi
+        ? normalizeKpiSortOrder(rawVisual?.settings?.sort_order || legacyKpiSortOrder)
+        : rawVisual?.settings?.sort_order ?? defaults.settings.sort_order,
+      top_n: isKpi
+        ? normalizeKpiTopN(rawVisual?.settings?.top_n)
+        : rawVisual?.settings?.top_n ?? defaults.settings.top_n,
+      dateFilter: isKpi
+        ? normalizeKpiDateFilter(rawVisual?.settings?.dateFilter)
+        : rawVisual?.settings?.dateFilter ?? defaults.settings.dateFilter,
+      dateField: isKpi
+        ? normalizeStringField(rawVisual?.settings?.dateField)
+        : rawVisual?.settings?.dateField ?? defaults.settings.dateField,
       titleTouched: Boolean(rawVisual?.settings?.titleTouched),
       fontFamily: FONT_FAMILY_OPTIONS.some((option) => option.value === rawVisual?.settings?.fontFamily)
         ? rawVisual.settings.fontFamily
@@ -567,12 +693,21 @@ function setCanvasField(visual, field, value, removeValue = false, multiple = fa
     })
   }
 
+  const nextValue = removeValue ? '' : value
+  const nextSettings = visual.kind === 'kpi' && field === 'label'
+    ? {
+        ...visual.settings,
+        groupBy: nextValue,
+      }
+    : visual.settings
+
   return updateCanvasVisualTitle({
     ...visual,
     fields: {
       ...visual.fields,
-      [field]: removeValue ? '' : value,
+      [field]: nextValue,
     },
+    settings: nextSettings,
   })
 }
 
@@ -625,7 +760,7 @@ function smartAssignFieldToVisual(visual, fieldName, columnProfiles, targetField
       ...nextVisual,
       settings: {
         ...nextVisual.settings,
-        kpiMode: normalizeKpiMode(nextVisual.settings?.kpiMode) === 'overall' ? 'highest' : nextVisual.settings?.kpiMode,
+        kpiMode: normalizeKpiMode(nextVisual.settings?.kpiMode) === 'overall' ? 'topEntity' : nextVisual.settings?.kpiMode,
       },
     })
   }
@@ -654,9 +789,15 @@ function configureDefaultKpiVisual(visual, columns, columnProfiles) {
   }
 
   const metricField = getKpiMetricColumns(columns, columnProfiles)[0] || ''
+  const dateField = getKpiDateColumns(columns, columnProfiles)[0] || ''
   const settings = {
     ...visual.settings,
     kpiMode: 'overall',
+    groupBy: '',
+    sort_order: 'descending',
+    top_n: 1,
+    dateFilter: 'all',
+    dateField,
     aggregation: metricField && !isIdentifierLikeField(metricField) ? 'sum' : 'count',
   }
   const nextVisual = metricField
@@ -1104,9 +1245,118 @@ function getCanvasVisualRenderKey(visual) {
   }
 }
 
-function computeGroupedCanvasKpi(rows, metricField, groupField, aggregation, mode) {
-  if (!groupField) {
+function getKpiDateRange(dateFilter) {
+  const normalizedFilter = normalizeKpiDateFilter(dateFilter)
+  if (normalizedFilter === 'all') {
     return null
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const end = new Date(today)
+  end.setDate(end.getDate() + 1)
+  const start = new Date(today)
+
+  if (normalizedFilter === 'last-7-days') {
+    start.setDate(start.getDate() - 6)
+  }
+
+  if (normalizedFilter === 'last-30-days') {
+    start.setDate(start.getDate() - 29)
+  }
+
+  return { start, end }
+}
+
+function parseKpiDate(value) {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  return date
+}
+
+function getFallbackKpiDateField(rows) {
+  const firstRow = Array.isArray(rows) ? rows.find((row) => row && typeof row === 'object') : null
+  const columns = firstRow ? Object.keys(firstRow) : []
+  const exactDateField = columns.find((column) => normalizeColumnToken(column) === 'date')
+  if (exactDateField) {
+    return exactDateField
+  }
+
+  return columns.find((column) => {
+    const normalizedColumn = normalizeColumnToken(column)
+    return /(date|time|day|month|year)/.test(normalizedColumn)
+      && rows.some((row) => Boolean(parseKpiDate(row?.[column])))
+  }) || ''
+}
+
+function filterCanvasKpiRowsByDate(rows, dateField, dateFilter) {
+  const dateRange = getKpiDateRange(dateFilter)
+  const resolvedDateField = dateField || getFallbackKpiDateField(rows)
+  if (!dateRange || !resolvedDateField) {
+    return rows
+  }
+
+  return rows.filter((row) => {
+    const date = parseKpiDate(row?.[resolvedDateField])
+    return date ? date >= dateRange.start && date < dateRange.end : false
+  })
+}
+
+function buildKpiSubtitle(visual, rowsBeforeFilter, rowsAfterFilter) {
+  if (visual.settings?.subtitle) {
+    return visual.settings.subtitle
+  }
+
+  const dateFilter = normalizeKpiDateFilter(visual.settings?.dateFilter)
+  if (dateFilter === 'all') {
+    return ''
+  }
+
+  const rowLabel = rowsBeforeFilter.length === rowsAfterFilter.length
+    ? ''
+    : `${formatValue(rowsAfterFilter.length)} rows`
+
+  return [getKpiDateFilterLabel(dateFilter), rowLabel].filter(Boolean).join(' | ')
+}
+
+function getCanvasKpiValidationError(visual, columnProfiles = []) {
+  if (!visual || visual.kind !== 'kpi') {
+    return ''
+  }
+
+  const metricField = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
+  const aggregation = normalizeAggregation(metricField ? visual.settings?.aggregation : 'count')
+  const groupField = getKpiGroupField(visual)
+
+  if (isNumericAggregation(aggregation) && getDisplayColumnType(metricField, columnProfiles) !== 'numeric') {
+    return `${getAggregationLabel(aggregation)} requires a numeric metric.`
+  }
+
+  if (normalizeKpiMode(visual.settings?.kpiMode) === 'topEntity' && !groupField) {
+    return 'Group By is required for Top Entity mode.'
+  }
+
+  if (
+    normalizeKpiMode(visual.settings?.kpiMode) === 'topEntity'
+    && groupField
+    && !['categorical', 'date'].includes(getDisplayColumnType(groupField, columnProfiles))
+  ) {
+    return 'Group By only supports categorical or date fields.'
+  }
+
+  return ''
+}
+
+function computeGroupedCanvasKpi(rows, metricField, groupField, aggregation, sortOrder, topN) {
+  if (!groupField) {
+    return []
   }
 
   const groupedRows = new Map()
@@ -1125,39 +1375,97 @@ function computeGroupedCanvasKpi(rows, metricField, groupField, aggregation, mod
     .filter((group) => group.value !== null && group.value !== undefined && Number.isFinite(Number(group.value)))
 
   if (!groups.length) {
-    return null
+    return []
   }
 
-  groups.sort((left, right) => Number(right.value) - Number(left.value))
-  return mode === 'lowest' ? groups[groups.length - 1] : groups[0]
+  const direction = normalizeKpiSortOrder(sortOrder) === 'ascending' ? 1 : -1
+  groups.sort((left, right) => {
+    const valueComparison = (Number(left.value) - Number(right.value)) * direction
+    return valueComparison || left.label.localeCompare(right.label)
+  })
+
+  return groups.slice(0, normalizeKpiTopN(topN))
 }
 
 function computeCanvasKpi(visual, rows) {
   const safeRows = Array.isArray(rows) ? rows : []
   const metricField = visual.fields?.values?.[0] || visual.fields?.y_axis || ''
-  const groupField = visual.fields?.label || ''
+  const groupField = getKpiGroupField(visual)
   const aggregation = metricField ? visual.settings?.aggregation || 'sum' : 'count'
   const kpiMode = normalizeKpiMode(visual.settings?.kpiMode)
   const aggregationLabel = getAggregationLabel(aggregation)
-  const metricLabel = metricField || 'records'
+  const metricLabel = getKpiMetricTitleLabel(metricField)
+  const filteredRows = filterCanvasKpiRowsByDate(
+    safeRows,
+    visual.settings?.dateField || '',
+    visual.settings?.dateFilter,
+  )
+  const subtitle = buildKpiSubtitle(visual, safeRows, filteredRows)
 
-  if (kpiMode !== 'overall' && groupField) {
-    const group = computeGroupedCanvasKpi(safeRows, metricField, groupField, aggregation, kpiMode)
-
+  if (kpiMode === 'topEntity' && !groupField) {
     return {
       label: getCanvasVisualTitle(visual),
-      value: group ? formatValue(group.value) : 'N/A',
-      hint: visual.settings?.subtitle || (group ? `${groupField}: ${group.label}` : 'No matching records'),
+      value: 'N/A',
+      hint: 'Select a Group By field for Top Entity mode.',
+      error: true,
     }
   }
 
-  const values = metricField ? safeRows.map((row) => row[metricField]) : safeRows
+  if (kpiMode === 'topEntity') {
+    const groups = computeGroupedCanvasKpi(
+      filteredRows,
+      metricField,
+      groupField,
+      aggregation,
+      visual.settings?.sort_order,
+      visual.settings?.top_n,
+    )
+    const topN = normalizeKpiTopN(visual.settings?.top_n)
+    const topGroup = groups[0]
+
+    if (!groups.length) {
+      return {
+        label: getCanvasVisualTitle(visual),
+        value: 'N/A',
+        hint: subtitle || 'No matching records',
+      }
+    }
+
+    if (topN === 1) {
+      return {
+        label: getCanvasVisualTitle(visual),
+        value: topGroup.label,
+        hint: [formatValue(topGroup.value), subtitle].filter(Boolean).join(' | '),
+      }
+    }
+
+    return {
+      label: getCanvasVisualTitle(visual),
+      value: '',
+      hint: subtitle,
+      items: groups.map((group, index) => ({
+        rank: index + 1,
+        label: group.label,
+        value: formatValue(group.value),
+      })),
+    }
+  }
+
+  const values = metricField ? filteredRows.map((row) => row[metricField]) : filteredRows
   const rawValue = aggregateCanvasValues(values, aggregation)
+
+  if (rawValue === null && isNumericAggregation(aggregation)) {
+    return {
+      label: getCanvasVisualTitle(visual),
+      value: 'N/A',
+      hint: subtitle || `No numeric values found for ${metricLabel}`,
+    }
+  }
 
   return {
     label: getCanvasVisualTitle(visual),
-    value: formatValue(rawValue ?? safeRows.length),
-    hint: visual.settings?.subtitle || `${aggregationLabel} of ${metricLabel}`,
+    value: formatValue(rawValue ?? filteredRows.length),
+    hint: subtitle || `${aggregationLabel} of ${metricLabel}`,
   }
 }
 
@@ -2635,8 +2943,19 @@ function CanvasKpiVisual({ visual, rows }) {
   return (
     <div className="blank-kpi-visual">
       <span>{kpi.label}</span>
-      <strong>{kpi.value}</strong>
-      <small>{kpi.hint}</small>
+      {Array.isArray(kpi.items) && kpi.items.length ? (
+        <ol className="blank-kpi-ranked-list">
+          {kpi.items.map((item) => (
+            <li key={`${item.rank}-${item.label}`}>
+              <span>{item.rank}. {item.label}</span>
+              <strong>{item.value}</strong>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <strong>{kpi.value}</strong>
+      )}
+      {kpi.hint ? <small>{kpi.hint}</small> : null}
       {visual.settings?.caption ? <p>{visual.settings.caption}</p> : null}
     </div>
   )
@@ -3006,10 +3325,23 @@ function BlankCanvasSidebar({
   })
   const fieldWells = selectedVisual ? getFieldWellsForVisual(selectedVisual) : []
   const selectedChartType = selectedVisual?.settings?.chart_type || selectedVisual?.type
-  const kpiMetricColumns = getKpiMetricColumns(columns, columnProfiles)
   const kpiGroupColumns = getKpiGroupColumns(columns, columnProfiles)
+  const kpiDateColumns = getKpiDateColumns(columns, columnProfiles)
   const selectedKpiMetric = selectedVisual?.fields?.values?.[0] || selectedVisual?.fields?.y_axis || ''
+  const selectedKpiAggregation = selectedKpiMetric ? selectedVisual?.settings?.aggregation || 'sum' : 'count'
   const selectedKpiMode = normalizeKpiMode(selectedVisual?.settings?.kpiMode)
+  const selectedKpiGroup = getKpiGroupField(selectedVisual)
+  const selectedKpiSortOrder = normalizeKpiSortOrder(selectedVisual?.settings?.sort_order)
+  const selectedKpiTopN = normalizeKpiTopN(selectedVisual?.settings?.top_n)
+  const selectedKpiDateFilter = normalizeKpiDateFilter(selectedVisual?.settings?.dateFilter)
+  const selectedKpiMetricOptions = getKpiMetricOptions(columns, columnProfiles, selectedKpiAggregation)
+  const visibleKpiMetricOptions = selectedKpiMetric && !selectedKpiMetricOptions.includes(selectedKpiMetric)
+    ? [selectedKpiMetric, ...selectedKpiMetricOptions]
+    : selectedKpiMetricOptions
+  const selectedKpiMetricType = getDisplayColumnType(selectedKpiMetric, columnProfiles)
+  const selectedKpiValidationError = selectedVisual?.kind === 'kpi'
+    ? getCanvasKpiValidationError(selectedVisual, columnProfiles)
+    : ''
   const toggleSection = (section) => {
     setOpenSections((previous) => ({
       ...previous,
@@ -3036,8 +3368,10 @@ function BlankCanvasSidebar({
 
     if (value) {
       onUpdateField(selectedVisual.id, 'values', value, false, false)
-      if (isIdentifierLikeField(value)) {
+      if (getDisplayColumnType(value, columnProfiles) !== 'numeric' || isIdentifierLikeField(value)) {
         onUpdateSetting(selectedVisual.id, 'aggregation', 'count')
+      } else if (!selectedVisual.settings?.aggregation || selectedVisual.settings.aggregation === 'count') {
+        onUpdateSetting(selectedVisual.id, 'aggregation', 'sum')
       }
       return
     }
@@ -3047,16 +3381,24 @@ function BlankCanvasSidebar({
     }
     onUpdateSetting(selectedVisual.id, 'aggregation', 'count')
   }
+  const updateKpiAggregation = (value) => {
+    if (!selectedVisual) {
+      return
+    }
+
+    const nextAggregation = normalizeAggregation(value)
+    onUpdateSetting(selectedVisual.id, 'aggregation', nextAggregation)
+
+    if (isNumericAggregation(nextAggregation) && selectedKpiMetricType !== 'numeric' && selectedKpiMetric) {
+      onUpdateField(selectedVisual.id, 'values', selectedKpiMetric, true, false)
+    }
+  }
   const updateKpiMode = (value) => {
     if (!selectedVisual) {
       return
     }
 
     onUpdateSetting(selectedVisual.id, 'kpiMode', value)
-
-    if (value !== 'overall' && !selectedVisual.fields?.label && kpiGroupColumns[0]) {
-      onUpdateField(selectedVisual.id, 'label', kpiGroupColumns[0], false, false)
-    }
   }
   const updateKpiGroup = (value) => {
     if (!selectedVisual) {
@@ -3071,7 +3413,18 @@ function BlankCanvasSidebar({
     if (selectedVisual.fields?.label) {
       onUpdateField(selectedVisual.id, 'label', selectedVisual.fields.label, true, false)
     }
-    onUpdateSetting(selectedVisual.id, 'kpiMode', 'overall')
+    onUpdateSetting(selectedVisual.id, 'groupBy', '')
+  }
+  const updateKpiDateFilter = (value) => {
+    if (!selectedVisual) {
+      return
+    }
+
+    onUpdateSetting(selectedVisual.id, 'dateFilter', normalizeKpiDateFilter(value))
+
+    if (!selectedVisual.settings?.dateField && kpiDateColumns[0]) {
+      onUpdateSetting(selectedVisual.id, 'dateField', kpiDateColumns[0])
+    }
   }
 
   return (
@@ -3161,7 +3514,7 @@ function BlankCanvasSidebar({
                       onChange={(event) => updateKpiMetric(event.target.value)}
                     >
                       <option value="">Record count</option>
-                      {kpiMetricColumns.map((column) => (
+                      {visibleKpiMetricOptions.map((column) => (
                         <option key={`kpi-metric-${column}`} value={column}>
                           {column}
                         </option>
@@ -3172,12 +3525,18 @@ function BlankCanvasSidebar({
                   <label>
                     <span>Calculation</span>
                     <select
-                      value={selectedKpiMetric ? selectedVisual.settings?.aggregation || 'sum' : 'count'}
-                      disabled={!selectedKpiMetric}
-                      onChange={(event) => onUpdateSetting(selectedVisual.id, 'aggregation', event.target.value)}
+                      value={selectedKpiAggregation}
+                      onChange={(event) => updateKpiAggregation(event.target.value)}
                     >
                       {AGGREGATION_OPTIONS.map((option) => (
-                        <option key={`canvas-kpi-agg-${option.value}`} value={option.value}>
+                        <option
+                          key={`canvas-kpi-agg-${option.value}`}
+                          value={option.value}
+                          disabled={
+                            option.value !== 'count'
+                            && (!selectedKpiMetric || selectedKpiMetricType !== 'numeric')
+                          }
+                        >
                           {option.label}
                         </option>
                       ))}
@@ -3194,7 +3553,7 @@ function BlankCanvasSidebar({
                         <option
                           key={`canvas-kpi-mode-${option.value}`}
                           value={option.value}
-                          disabled={option.value !== 'overall' && !kpiGroupColumns.length}
+                          disabled={option.value === 'topEntity' && !kpiGroupColumns.length}
                         >
                           {option.label}
                         </option>
@@ -3202,21 +3561,68 @@ function BlankCanvasSidebar({
                     </select>
                   </label>
 
-                  {selectedKpiMode !== 'overall' ? (
+                  {selectedKpiMode === 'topEntity' ? (
+                    <>
+                      <label>
+                        <span>Group By</span>
+                        <select
+                          value={selectedKpiGroup}
+                          onChange={(event) => updateKpiGroup(event.target.value)}
+                        >
+                          <option value="">None</option>
+                          {kpiGroupColumns.map((column) => (
+                            <option key={`kpi-group-${column}`} value={column}>
+                              {column}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        <span>Sort Order</span>
+                        <select
+                          value={selectedKpiSortOrder}
+                          onChange={(event) => onUpdateSetting(selectedVisual.id, 'sort_order', event.target.value)}
+                        >
+                          {KPI_SORT_ORDER_OPTIONS.map((option) => (
+                            <option key={`kpi-sort-${option.value}`} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        <span>Top N</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="50"
+                          value={selectedKpiTopN}
+                          onChange={(event) => onUpdateSetting(selectedVisual.id, 'top_n', normalizeKpiTopN(event.target.value))}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+
+                  {kpiDateColumns.length ? (
                     <label>
-                      <span>Group by</span>
+                      <span>Date Filter</span>
                       <select
-                        value={selectedVisual.fields?.label || ''}
-                        onChange={(event) => updateKpiGroup(event.target.value)}
+                        value={selectedKpiDateFilter}
+                        onChange={(event) => updateKpiDateFilter(event.target.value)}
                       >
-                        <option value="">None</option>
-                        {kpiGroupColumns.map((column) => (
-                          <option key={`kpi-group-${column}`} value={column}>
-                            {column}
+                        {KPI_DATE_FILTER_OPTIONS.map((option) => (
+                          <option key={`kpi-date-${option.value}`} value={option.value}>
+                            {option.label}
                           </option>
                         ))}
                       </select>
                     </label>
+                  ) : null}
+
+                  {selectedKpiValidationError ? (
+                    <p className="blank-settings-error" role="alert">{selectedKpiValidationError}</p>
                   ) : null}
                 </div>
               ) : (

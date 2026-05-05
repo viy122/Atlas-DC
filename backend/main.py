@@ -79,7 +79,7 @@ NULL_TEXT_TOKENS = {
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
 GEMINI_DEFAULT_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash-lite")
-AI_INSIGHTS_CACHE_VERSION = "polished-v2"
+AI_INSIGHTS_CACHE_VERSION = "polished-v3"
 GEMINI_INSIGHTS_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -1433,6 +1433,12 @@ def _section_to_strings(value: object) -> list[str]:
         return items
 
     if isinstance(value, str):
+        parsed_value = _parse_jsonish_text(value)
+        if isinstance(parsed_value, (dict, list)):
+            nested_items = _section_to_strings(parsed_value)
+            if nested_items:
+                return nested_items
+
         lines = [
             _clean_ai_sentence(re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line))
             for line in value.splitlines()
@@ -1477,6 +1483,59 @@ def _get_case_insensitive_value(parsed: dict[str, object], *keys: str) -> object
     return None
 
 
+def _looks_like_insights_object(parsed: object) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+
+    insight_keys = {
+        "key_insights",
+        "key_insight",
+        "key insights",
+        "insights",
+        "summary",
+        "trends",
+        "trend",
+        "data_quality_notes",
+        "data quality notes",
+        "data_quality",
+        "simple_recommendations",
+        "simple recommendations",
+        "recommendations",
+    }
+    normalized_keys = {
+        re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+        for key in parsed
+    }
+    normalized_insight_keys = {
+        re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+        for key in insight_keys
+    }
+    return bool(normalized_keys & normalized_insight_keys)
+
+
+def _unwrap_nested_insights_object(parsed: dict[str, object]) -> dict[str, object]:
+    if _looks_like_insights_object(parsed):
+        for value in parsed.values():
+            candidate_text = ""
+            if isinstance(value, str):
+                candidate_text = value
+            elif (
+                isinstance(value, list)
+                and len(value) == 1
+                and isinstance(value[0], str)
+            ):
+                candidate_text = value[0]
+
+            if not candidate_text:
+                continue
+
+            nested = _parse_jsonish_text(candidate_text)
+            if _looks_like_insights_object(nested):
+                return nested
+
+    return parsed
+
+
 def _parsed_object_to_insights(parsed: dict[str, object]) -> dict[str, list[str]]:
     return {
         "key_insights": _section_to_strings(
@@ -1508,6 +1567,7 @@ def _normalize_gemini_insights(text: str) -> dict[str, list[str]]:
     if not isinstance(parsed, dict):
         parsed = {}
 
+    parsed = _unwrap_nested_insights_object(parsed)
     insights = _parsed_object_to_insights(parsed)
 
     if (
