@@ -1,17 +1,25 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
+import { CompactMetric, DatasetPill } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
 import { formatDataType, formatPercent, formatValue, totalMissing } from '../utils/formatters'
 
 function ProfileMetric({ label, value, hint }) {
-  return (
-    <article className="profile-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{hint}</small>
-    </article>
-  )
+  return <CompactMetric icon="profile" label={label} value={formatValue(value)} hint={hint} />
+}
+
+function TypeChip({ type }) {
+  return <span className={`compact-type-chip compact-type-chip--${String(type).toLowerCase()}`}>{type}</span>
+}
+
+function formatStatValue(value) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return 'Not available'
+  }
+
+  return formatValue(Number(numericValue.toFixed(2)))
 }
 
 function ProfilingPage() {
@@ -58,15 +66,15 @@ function ProfilingPage() {
       <header className="profile-toolbar">
         <div>
           <span>Profile</span>
-          <strong>{fileName || datasetId}</strong>
+          <DatasetPill name={fileName || datasetId} />
         </div>
 
         <div className="profile-toolbar__actions">
-          <Link to="/dataset" className="ghost-button icon-only-button" title="Back to upload" aria-label="Back to upload">
-            <IconButtonContent icon="back" label="Back to upload" />
+          <Link to="/dataset" className="ghost-button" title="Back to upload">
+            <IconButtonContent icon="back" label="Back" showLabel />
           </Link>
-          <Link to="/cleaning" className="primary-button icon-only-button" title="Continue to clean" aria-label="Continue to clean">
-            <IconButtonContent icon="clean" label="Continue to clean" />
+          <Link to="/cleaning" className="primary-button" title="Continue to clean">
+            <IconButtonContent icon="clean" label="Continue to Clean" showLabel />
           </Link>
         </div>
       </header>
@@ -113,8 +121,8 @@ function ProfilingPage() {
                     <td>
                       <strong>{column.name}</strong>
                     </td>
-                    <td>{formatDataType(column.dtype)}</td>
-                    <td>{column.missing_values}</td>
+                    <td><TypeChip type={formatDataType(column.dtype)} /></td>
+                    <td>{formatValue(column.missing_values)}</td>
                     <td>
                       <div className="profile-missing-cell">
                         <span>{formatPercent(column.missing_percent ?? 0, 1)}</span>
@@ -128,7 +136,7 @@ function ProfilingPage() {
                       </div>
                     </td>
                     <td>{column.unique_values ?? '-'}</td>
-                    <td>{column.non_null_values}</td>
+                    <td>{formatValue(column.non_null_values)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -142,8 +150,8 @@ function ProfilingPage() {
             <div className="profile-type-list">
               {Object.entries(profileSummary.typeCounts).map(([type, count]) => (
                 <div key={type}>
-                  <span>{type}</span>
-                  <strong>{count}</strong>
+                  <TypeChip type={type} />
+                  <strong>{formatValue(count)}</strong>
                 </div>
               ))}
             </div>
@@ -152,12 +160,16 @@ function ProfilingPage() {
           <section className="profile-side-section">
             <h3>Quality Focus</h3>
             <div className="profile-note">
-              <span>Highest missing</span>
-              <strong>{profileSummary.riskiestColumn?.name ?? '-'}</strong>
+              <span>{profileSummary.totalMissingCells > 0 ? 'Highest missing' : 'No missing values detected'}</span>
+              <strong>
+                {profileSummary.totalMissingCells > 0
+                  ? profileSummary.riskiestColumn?.name ?? '-'
+                  : 'All columns complete'}
+              </strong>
               <small>
-                {profileSummary.riskiestColumn
+                {profileSummary.totalMissingCells > 0 && profileSummary.riskiestColumn
                   ? `${profileSummary.riskiestColumn.missing_values} missing values`
-                  : 'No columns detected'}
+                  : 'All columns are currently complete.'}
               </small>
             </div>
           </section>
@@ -172,19 +184,19 @@ function ProfilingPage() {
                     <div className="profile-stat-metrics">
                       <span>
                         <em>Sum</em>
-                        {formatValue(stat.sum)}
+                        {formatStatValue(stat.sum)}
                       </span>
                       <span>
                         <em>Average</em>
-                        {formatValue(stat.mean)}
+                        {formatStatValue(stat.mean)}
                       </span>
                       <span>
                         <em>Middle</em>
-                        {formatValue(stat.median)}
+                        {formatStatValue(stat.median)}
                       </span>
                       <span>
                         <em>Range</em>
-                        {formatValue(stat.min)} to {formatValue(stat.max)}
+                        {formatStatValue(stat.min)} to {formatStatValue(stat.max)}
                       </span>
                     </div>
                   </article>

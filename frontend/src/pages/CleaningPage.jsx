@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
+import { DatasetPill } from '../components/CompactUI'
 import ComparisonTable from '../components/ComparisonTable'
 import { useAtlas } from '../context/AtlasContext'
 import { buildCleaningRecommendations, buildQualityReport } from '../utils/dataQuality'
-import { formatPercent } from '../utils/formatters'
+import { formatPercent, formatValue } from '../utils/formatters'
 
 const DEFAULT_CLEANING_OPTIONS = {
   normalize_placeholder_nulls: true,
@@ -87,6 +88,34 @@ const CLEANING_OPTIONS = [
   },
 ]
 
+const CLEANING_RULE_GROUPS = [
+  {
+    title: 'Missing Values',
+    description: 'Normalize blanks and handle missing critical values.',
+    keys: ['normalize_placeholder_nulls', 'fill_numeric_missing', 'fill_text_with_mode', 'drop_critical_missing'],
+  },
+  {
+    title: 'Text Cleaning',
+    description: 'Keep category and label text consistent.',
+    keys: ['standardize_text'],
+  },
+  {
+    title: 'Type Conversion',
+    description: 'Prepare date and numeric fields for analysis.',
+    keys: ['convert_datetime_columns', 'convert_numeric_columns'],
+  },
+  {
+    title: 'Duplicate Handling',
+    description: 'Remove exact duplicates and flag duplicate keys.',
+    keys: ['remove_duplicates', 'flag_duplicate_keys'],
+  },
+  {
+    title: 'Validation Rules',
+    description: 'Validate emails, numeric ranges, and future dates.',
+    keys: ['validate_emails', 'validate_numeric_ranges', 'validate_future_dates'],
+  },
+]
+
 function parseKeywordList(value) {
   return value
     .split(',')
@@ -116,7 +145,23 @@ function CleaningOptionToggle({ option, checked, onChange }) {
         <strong>{option.title}</strong>
         <small>{option.description}</small>
       </span>
+      <em>{checked ? 'On' : 'Off'}</em>
     </label>
+  )
+}
+
+function CleaningRuleGroup({ group, children, defaultOpen = false }) {
+  return (
+    <details className="cleaning-rule-group" open={defaultOpen}>
+      <summary>
+        <div>
+          <strong>{group.title}</strong>
+          <span>{group.description}</span>
+        </div>
+        <em>{group.keys.length} rules</em>
+      </summary>
+      <div className="cleaning-rule-group__body">{children}</div>
+    </details>
   )
 }
 
@@ -126,8 +171,16 @@ function SmartRecommendationPanel({ recommendations, onApply }) {
       <summary className="smart-recommendation-head">
         <div>
           <span>Smart Recommendations</span>
-          <h2>{recommendations.length} suggested cleaning rule(s)</h2>
-          <p>Open only when you want ATLAS to preselect likely rules.</p>
+          <h2>
+            {recommendations.length
+              ? `${recommendations.length} suggested cleaning rule(s)`
+              : 'Your dataset looks clean'}
+          </h2>
+          <p>
+            {recommendations.length
+              ? 'Open only when you want ATLAS to preselect likely rules.'
+              : 'You can still review optional rules.'}
+          </p>
         </div>
         <em>Open</em>
       </summary>
@@ -158,7 +211,7 @@ function SmartRecommendationPanel({ recommendations, onApply }) {
             ))}
           </div>
         ) : (
-          <p className="empty-state-inline">No high-confidence recommendation is needed for the current profile.</p>
+          <p className="empty-state-inline">Your dataset looks clean. You can still review optional rules.</p>
         )}
       </div>
     </details>
@@ -182,6 +235,9 @@ function QualityScoreCard({ title, report, muted = false }) {
             <div>
               <span>{dimension.label}</span>
               <small>{dimension.detail}</small>
+              <div className="quality-progress-bar">
+                <div style={{ width: `${Math.min(Math.max(Number(dimension.score) || 0, 0), 100)}%` }} />
+              </div>
             </div>
             <strong>{formatPercent(dimension.score, 0)}</strong>
           </div>
@@ -288,28 +344,27 @@ function CleaningPage() {
       <header className="cleaning-toolbar">
         <div>
           <span>Clean</span>
-          <strong>{fileName || datasetId}</strong>
+          <DatasetPill name={fileName || datasetId} />
         </div>
 
         <div className="cleaning-toolbar__actions">
-          <Link to="/profiling" className="ghost-button icon-only-button" title="Back to profile" aria-label="Back to profile">
-            <IconButtonContent icon="back" label="Back to profile" />
+          <Link to="/profiling" className="ghost-button" title="Back to profile">
+            <IconButtonContent icon="back" label="Back" showLabel />
           </Link>
           <button
             type="button"
-            className="ghost-button icon-only-button"
+            className="ghost-button"
             onClick={() => downloadDataset({ stage: 'cleaned' })}
             disabled={!hasCleaned || busyAction === 'exporting'}
             title={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'}
-            aria-label={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'}
           >
-            <IconButtonContent icon="download" label={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'} />
+            <IconButtonContent icon="download" label={busyAction === 'exporting' ? 'Exporting' : 'Export Cleaned'} showLabel />
           </button>
-          <Link to="/analysis" className={hasCleaned ? 'ghost-button icon-only-button' : 'ghost-button icon-only-button disabled-link'} title="Analyze" aria-label="Analyze">
-            <IconButtonContent icon="analyze" label="Analyze" />
+          <Link to="/analysis" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'} title="Analyze">
+            <IconButtonContent icon="analyze" label="Analyze" showLabel />
           </Link>
-          <Link to="/visualization" className={hasCleaned ? 'ghost-button icon-only-button' : 'ghost-button icon-only-button disabled-link'} title="Visualize" aria-label="Visualize">
-            <IconButtonContent icon="visualize" label="Visualize" />
+          <Link to="/visualization" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'} title="Visualize">
+            <IconButtonContent icon="visualize" label="Visualize" showLabel />
           </Link>
         </div>
 
@@ -319,13 +374,12 @@ function CleaningPage() {
           </span>
           <button
             type="button"
-            className="primary-button icon-only-button"
+            className="primary-button"
             onClick={handleRunCleaning}
             disabled={busyAction === 'cleaning'}
             title={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Clean all again' : 'Clean all'}
-            aria-label={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Clean all again' : 'Clean all'}
           >
-            <IconButtonContent icon="spark" label={busyAction === 'cleaning' ? 'Cleaning' : 'Clean all'} />
+            <IconButtonContent icon="spark" label={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Run Again' : 'Run Cleaning'} showLabel />
           </button>
         </div>
       </header>
@@ -348,15 +402,27 @@ function CleaningPage() {
           </button>
         </div>
 
-        <div className="cleaning-options-grid">
-          {CLEANING_OPTIONS.map((option) => (
-            <CleaningOptionToggle
-              key={option.key}
-              option={option}
-              checked={Boolean(cleaningOptions[option.key])}
-              onChange={updateCleaningOption}
-            />
-          ))}
+        <div className="cleaning-rule-group-stack">
+          {CLEANING_RULE_GROUPS.map((group, index) => {
+            const groupOptions = group.keys
+              .map((key) => CLEANING_OPTIONS.find((option) => option.key === key))
+              .filter(Boolean)
+
+            return (
+              <CleaningRuleGroup key={group.title} group={group} defaultOpen={index === 0}>
+                <div className="cleaning-options-grid">
+                  {groupOptions.map((option) => (
+                    <CleaningOptionToggle
+                      key={option.key}
+                      option={option}
+                      checked={Boolean(cleaningOptions[option.key])}
+                      onChange={updateCleaningOption}
+                    />
+                  ))}
+                </div>
+              </CleaningRuleGroup>
+            )
+          })}
         </div>
 
         <div className="cleaning-keyword-grid">
@@ -400,12 +466,12 @@ function CleaningPage() {
       </section>
 
       <section className="cleaning-summary-strip">
-        <CleaningMetric label="Nulls Normalized" value={cleaningSummary?.nulls_normalized ?? 0} hint="Explicit placeholders only" />
-        <CleaningMetric label="Rows Dropped" value={rowsDropped.total ?? 0} hint="Critical or invalid rows" />
-        <CleaningMetric label="Duplicates Removed" value={cleaningSummary?.duplicates_removed ?? 0} hint="Full-row duplicates only" />
-        <CleaningMetric label="Flagged Rows" value={flaggedRows.total ?? 0} hint="Kept for review" />
-        <CleaningMetric label="Numeric Filled" value={filledNumeric.total ?? 0} hint="Mean or median" />
-        <CleaningMetric label="Text Filled" value={filledText.total ?? 0} hint="Off by default" />
+        <CleaningMetric label="Nulls Normalized" value={formatValue(cleaningSummary?.nulls_normalized ?? 0)} hint="Explicit placeholders only" />
+        <CleaningMetric label="Rows Dropped" value={formatValue(rowsDropped.total ?? 0)} hint="Critical or invalid rows" />
+        <CleaningMetric label="Duplicates Removed" value={formatValue(cleaningSummary?.duplicates_removed ?? 0)} hint="Full-row duplicates only" />
+        <CleaningMetric label="Flagged Rows" value={formatValue(flaggedRows.total ?? 0)} hint="Kept for review" />
+        <CleaningMetric label="Numeric Filled" value={formatValue(filledNumeric.total ?? 0)} hint="Mean or median" />
+        <CleaningMetric label="Text Filled" value={formatValue(filledText.total ?? 0)} hint="Off by default" />
       </section>
 
       <section className="cleaning-tab-shell">

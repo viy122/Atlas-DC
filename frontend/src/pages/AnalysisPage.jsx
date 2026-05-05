@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { CompactWorkspaceBar } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
 import { buildQualityReport } from '../utils/dataQuality'
 import { formatPercent, formatValue, totalMissing } from '../utils/formatters'
@@ -296,33 +297,38 @@ function AnalysisPage() {
 
   return (
     <div className="page-grid">
-      <section className="page-header">
-        <div>
-          <h1>Automated Insights</h1>
-          <p>AI-inspired interpretations for {fileName || 'your active dataset'}.</p>
-        </div>
-
-        <div className="page-header__actions">
-          <span className="status-badge status-badge--success">Live Analysis Active</span>
-        </div>
-      </section>
-
-      <section className="analysis-view-tabs" role="tablist" aria-label="Analysis views">
-        {ANALYSIS_TABS.map((tab) => (
+      <CompactWorkspaceBar
+        title="Analyze"
+        datasetName={fileName || 'your active dataset'}
+        status={currentAiPayload?.cached ? 'Cached' : 'Live Analysis Active'}
+        actions={(
           <button
-            key={tab.key}
             type="button"
-            id={`analysis-tab-${tab.key}`}
-            className={`analysis-view-tab${activeAnalysisTab === tab.key ? ' analysis-view-tab--active' : ''}`}
-            role="tab"
-            aria-selected={activeAnalysisTab === tab.key}
-            aria-controls={`analysis-panel-${tab.key}`}
-            onClick={() => setActiveAnalysisTab(tab.key)}
+            className="primary-button"
+            onClick={handleGenerateAiInsights}
+            disabled={aiInsightsLoading}
           >
-            {tab.label}
+            {aiInsightsLoading ? 'Generating...' : 'Generate AI Insights'}
           </button>
-        ))}
-      </section>
+        )}
+      >
+        <div className="analysis-view-tabs analysis-view-tabs--compact" role="tablist" aria-label="Analysis views">
+          {ANALYSIS_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              id={`analysis-tab-${tab.key}`}
+              className={`analysis-view-tab${activeAnalysisTab === tab.key ? ' analysis-view-tab--active' : ''}`}
+              role="tab"
+              aria-selected={activeAnalysisTab === tab.key}
+              aria-controls={`analysis-panel-${tab.key}`}
+              onClick={() => setActiveAnalysisTab(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </CompactWorkspaceBar>
 
       {activeAnalysisTab === 'ai' ? (
         <section
@@ -335,19 +341,11 @@ function AnalysisPage() {
             <div className="surface-card ai-insights-control">
               <div>
                 <h2>AI Insights</h2>
-                <p>Human-readable interpretation generated from computed dataset summaries.</p>
+                <p>Generated from computed dataset summaries.</p>
               </div>
 
               <div className="ai-insights-actions">
                 {currentAiPayload?.cached ? <span className="status-badge">Cached</span> : null}
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleGenerateAiInsights}
-                  disabled={aiInsightsLoading}
-                >
-                  {aiInsightsLoading ? 'Generating...' : 'Generate AI Insights'}
-                </button>
               </div>
             </div>
 

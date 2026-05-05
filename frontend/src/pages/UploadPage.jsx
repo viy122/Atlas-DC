@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
+import { CompactMetric, EmptyStateMascot } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
-import { formatDataType } from '../utils/formatters'
+import { formatDataType, formatValue, totalMissing } from '../utils/formatters'
 
 function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data', iconOnly = false }) {
   return (
@@ -81,10 +82,45 @@ function UploadPage() {
   const canUndo = undoStack.length > 0
   const canRedo = redoStack.length > 0
 
+  useEffect(() => {
+    document.documentElement.classList.add('atlas-upload-locked')
+    document.body.classList.add('atlas-upload-locked')
+
+    return () => {
+      document.documentElement.classList.remove('atlas-upload-locked')
+      document.body.classList.remove('atlas-upload-locked')
+    }
+  }, [])
+
   const columnProfilesByName = useMemo(
     () => new Map((rawProfile?.column_profiles ?? []).map((column) => [column.name, column])),
     [rawProfile],
   )
+  const datasetSummary = useMemo(() => {
+    const columnProfiles = rawProfile?.column_profiles ?? []
+    const typeCounts = columnProfiles.reduce(
+      (counts, column) => {
+        const type = formatDataType(column.dtype)
+        if (type === 'NUMBER') {
+          counts.numeric += 1
+        } else if (type === 'DATETIME') {
+          counts.date += 1
+        } else {
+          counts.text += 1
+        }
+
+        return counts
+      },
+      { numeric: 0, date: 0, text: 0 },
+    )
+
+    return {
+      rows: rawProfile?.rows ?? uploadedDataset.rows.length,
+      columns: rawProfile?.columns_count ?? columns.length,
+      missing: columnProfiles.length ? totalMissing(columnProfiles) : null,
+      ...typeCounts,
+    }
+  }, [columns.length, rawProfile, uploadedDataset.rows.length])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -240,11 +276,28 @@ function UploadPage() {
     <div className="upload-workbench">
       <section className="query-main">
         <div className="editor-toolbar upload-editor-toolbar">
-          <div className="editor-toolbar__group">
-            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} iconOnly />
+          <div className="editor-toolbar__group editor-toolbar__group--compact">
+            <span className="toolbar-group-label">File</span>
+            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} label="Upload" />
             <button type="button" className="editor-toolbar__button icon-only-button" onClick={resetWorkspace} disabled={!hasDataset} title="Close dataset" aria-label="Close dataset">
               <IconButtonContent icon="close" label="Close dataset" />
             </button>
+            <button
+              type="button"
+              className="editor-toolbar__button"
+              onClick={handleSaveEdits}
+              disabled={!hasDataset || !hasUnsavedChanges || busyAction === 'saving'}
+              title={busyAction === 'saving' ? 'Saving' : 'Save changes'}
+            >
+              <IconButtonContent icon="save" label={busyAction === 'saving' ? 'Saving' : 'Save'} showLabel />
+            </button>
+            <button type="button" className="editor-toolbar__button" onClick={exportCsv} disabled={!hasDataset} title="Export CSV">
+              <IconButtonContent icon="download" label="Export" showLabel />
+            </button>
+          </div>
+
+          <div className="editor-toolbar__group editor-toolbar__group--compact">
+            <span className="toolbar-group-label">Edit</span>
             <button type="button" className="editor-toolbar__button icon-only-button" onClick={resetEdits} disabled={!hasUnsavedChanges} title="Reset edits" aria-label="Reset edits">
               <IconButtonContent icon="reset" label="Reset edits" />
             </button>
@@ -254,30 +307,18 @@ function UploadPage() {
             <button type="button" className="editor-toolbar__button icon-only-button" onClick={redoEdit} disabled={!canRedo} title="Redo" aria-label="Redo">
               <IconButtonContent icon="redo" label="Redo" />
             </button>
-            <button
-              type="button"
-              className="editor-toolbar__button icon-only-button"
-              onClick={handleSaveEdits}
-              disabled={!hasDataset || !hasUnsavedChanges || busyAction === 'saving'}
-              title={busyAction === 'saving' ? 'Saving' : 'Save changes'}
-              aria-label={busyAction === 'saving' ? 'Saving' : 'Save changes'}
-            >
-              <IconButtonContent icon="save" label={busyAction === 'saving' ? 'Saving' : 'Save changes'} />
-            </button>
-            <button type="button" className="editor-toolbar__button icon-only-button" onClick={addRow} disabled={!hasDataset} title="Add row" aria-label="Add row">
-              <IconButtonContent icon="plus" label="Add row" />
-            </button>
-            <button type="button" className="editor-toolbar__button icon-only-button" onClick={exportCsv} disabled={!hasDataset} title="Export CSV" aria-label="Export CSV">
-              <IconButtonContent icon="download" label="Export CSV" />
+            <button type="button" className="editor-toolbar__button" onClick={addRow} disabled={!hasDataset} title="Add row">
+              <IconButtonContent icon="plus" label="Add Row" showLabel />
             </button>
           </div>
 
-          <div className="editor-toolbar__group">
-            <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button icon-only-button' : 'editor-toolbar__button icon-only-button disabled-link'} title="Profile" aria-label="Profile">
-              <IconButtonContent icon="profile" label="Profile" />
+          <div className="editor-toolbar__group editor-toolbar__group--compact">
+            <span className="toolbar-group-label">View</span>
+            <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'} title="Profile">
+              <IconButtonContent icon="profile" label="Profile" showLabel />
             </Link>
-            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button icon-only-button' : 'editor-toolbar__button icon-only-button disabled-link'} title="Clean" aria-label="Clean">
-              <IconButtonContent icon="clean" label="Clean" />
+            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'} title="Clean">
+              <IconButtonContent icon="clean" label="Clean" showLabel />
             </Link>
           </div>
 
@@ -307,6 +348,17 @@ function UploadPage() {
         {saveMessage ? <p className="info-banner">{saveMessage}</p> : null}
 
         {hasDataset ? (
+          <section className="compact-metric-strip upload-summary-strip" aria-label="Dataset summary">
+            <CompactMetric icon="profile" label="Rows" value={formatValue(datasetSummary.rows)} />
+            <CompactMetric icon="profile" label="Columns" value={formatValue(datasetSummary.columns)} />
+            <CompactMetric icon="clean" label="Missing Cells" value={datasetSummary.missing === null ? '-' : formatValue(datasetSummary.missing)} />
+            <CompactMetric icon="analyze" label="Numeric" value={formatValue(datasetSummary.numeric)} />
+            <CompactMetric icon="calendar" label="Date" value={formatValue(datasetSummary.date)} />
+            <CompactMetric icon="edit" label="Text" value={formatValue(datasetSummary.text)} />
+          </section>
+        ) : null}
+
+        {hasDataset ? (
           <div className="dataset-table-shell dataset-table-shell--editor upload-edit-grid">
             <div className="dataset-table-scroll dataset-table-scroll--editor">
               <table className="dataset-grid-table dataset-grid-table--editor editable-grid-table">
@@ -320,7 +372,8 @@ function UploadPage() {
                         <th key={column}>
                           <span className="column-title">{column}</span>
                           <span className="column-meta">
-                            {formatDataType(profile?.dtype)} / {profile?.missing_values ?? 0} null
+                            <em>{formatDataType(profile?.dtype)}</em>
+                            <small>{profile?.missing_values ?? 0} missing</small>
                           </span>
                         </th>
                       )
@@ -358,15 +411,17 @@ function UploadPage() {
             </div>
           </div>
         ) : (
-          <div className="empty-panel upload-empty-panel">
-            <h2>No dataset loaded</h2>
-            <p>Choose a CSV or Excel file. The table will appear here and can be edited before saving.</p>
-            <ImportDatasetButton
-              busy={busyAction === 'uploading'}
-              onFileSelect={uploadDataset}
-              label="Import Dataset"
-            />
-          </div>
+          <EmptyStateMascot
+            title="No dataset loaded"
+            description="Choose a CSV or Excel file. The table will appear here and can be edited before saving."
+            action={(
+              <ImportDatasetButton
+                busy={busyAction === 'uploading'}
+                onFileSelect={uploadDataset}
+                label="Import Dataset"
+              />
+            )}
+          />
         )}
       </section>
     </div>

@@ -1,4 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { useState } from 'react'
+import { BabyAtlasTour } from './components/CompactUI'
 import TopNavigation from './components/TopNavigation'
 import { AtlasProvider } from './context/AtlasContext'
 import AnalysisPage from './pages/AnalysisPage'
@@ -10,11 +12,13 @@ import VisualizationPage from './pages/VisualizationPage'
 import './App.css'
 
 function App() {
+  const [tourRestartToken, setTourRestartToken] = useState(0)
+
   return (
     <AtlasProvider>
       <div className="app-shell">
         <div className="app-content">
-          <TopNavigation />
+          <TopNavigation onStartTour={() => setTourRestartToken((current) => current + 1)} />
 
           <main className="app-main">
             <Routes>
@@ -33,6 +37,7 @@ function App() {
               <Route path="*" element={<Navigate to="/dataset" replace />} />
             </Routes>
           </main>
+          <BabyAtlasTour restartToken={tourRestartToken} />
         </div>
       </div>
     </AtlasProvider>

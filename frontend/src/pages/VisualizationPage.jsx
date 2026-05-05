@@ -4,6 +4,7 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import Chart from 'react-apexcharts'
 import { Link } from 'react-router-dom'
 import { IconButtonContent } from '../components/AtlasBrand'
+import { DatasetPill } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
 import { formatValue } from '../utils/formatters'
 
@@ -5442,7 +5443,7 @@ function VisualizationPage() {
                 ? 'Edit mode / cleaned visualization'
                 : 'Edit mode / latest visualization'}
           </span>
-          <strong>{fileName || datasetId}</strong>
+          <DatasetPill name={fileName || datasetId} />
           {isFinalized && savedAtLabel ? <small>Saved {savedAtLabel}</small> : null}
         </div>
         <div className="visual-toolbar__actions">
@@ -5450,55 +5451,51 @@ function VisualizationPage() {
             <>
               <button
                 type="button"
-                className="visual-secondary-button icon-only-button"
+                className="visual-secondary-button"
                 onClick={exportDashboardPng}
                 disabled={isExporting || presentationWidgetCount === 0}
                 title={isExporting ? 'Exporting' : 'Export PNG'}
-                aria-label={isExporting ? 'Exporting' : 'Export PNG'}
               >
-                <IconButtonContent icon="image" label={isExporting ? 'Exporting' : 'Export PNG'} />
+                <IconButtonContent icon="image" label={isExporting ? 'Exporting' : 'Export PNG'} showLabel />
               </button>
               <button
                 type="button"
-                className="visual-secondary-button icon-only-button"
+                className="visual-secondary-button"
                 onClick={exportDashboardPdf}
                 disabled={isExporting || presentationWidgetCount === 0}
                 title="Export PDF"
-                aria-label="Export PDF"
               >
-                <IconButtonContent icon="pdf" label="Export PDF" />
+                <IconButtonContent icon="pdf" label="Export PDF" showLabel />
               </button>
-              <button type="button" className="visual-secondary-button icon-only-button" onClick={returnToEditMode} title="Back to edit mode" aria-label="Back to edit mode">
-                <IconButtonContent icon="back" label="Back to edit mode" />
+              <button type="button" className="visual-secondary-button" onClick={returnToEditMode} title="Back to edit mode">
+                <IconButtonContent icon="back" label="Back to Edit" showLabel />
               </button>
             </>
           ) : (
             <>
               <button
                 type="button"
-                className="visual-apply-button icon-only-button"
+                className="visual-apply-button"
                 onClick={finalizeDashboard}
                 disabled={workspaceWidgetCount === 0}
                 title="Finalize dashboard"
-                aria-label="Finalize dashboard"
               >
-                <IconButtonContent icon="save" label="Finalize dashboard" />
+                <IconButtonContent icon="save" label="Save" showLabel />
               </button>
-              <button type="button" className="visual-secondary-button icon-only-button" onClick={loadSavedDashboard} title="Load saved" aria-label="Load saved">
-                <IconButtonContent icon="load" label="Load saved" />
+              <button type="button" className="visual-secondary-button" onClick={loadSavedDashboard} title="Load saved">
+                <IconButtonContent icon="load" label="Load" showLabel />
               </button>
               <button
                 type="button"
-                className="visual-secondary-button icon-only-button"
+                className="visual-secondary-button"
                 onClick={regenerateDashboard}
                 disabled={isLoading || !hasDatasetPayload}
                 title={isLoading ? 'Generating' : 'Regenerate'}
-                aria-label={isLoading ? 'Generating' : 'Regenerate'}
               >
-                <IconButtonContent icon="reset" label={isLoading ? 'Generating' : 'Regenerate'} />
+                <IconButtonContent icon="reset" label={isLoading ? 'Generating' : 'Refresh'} showLabel />
               </button>
-              <Link to="/cleaning" className="visual-secondary-button icon-only-button" title="Back to clean" aria-label="Back to clean">
-                <IconButtonContent icon="back" label="Back to clean" />
+              <Link to="/cleaning" className="visual-secondary-button" title="Back to clean">
+                <IconButtonContent icon="back" label="Back" showLabel />
               </Link>
             </>
           )}
