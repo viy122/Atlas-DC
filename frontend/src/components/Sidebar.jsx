@@ -1,78 +1,122 @@
 import { NavLink } from 'react-router-dom'
-import { AtlasLogo } from './AtlasBrand'
+import { AtlasIcon, AtlasLogo } from './AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 
-const LINKS = [
-  { to: '/dataset', label: 'Upload', step: '01' },
-  { to: '/profiling', label: 'Profile', step: '02' },
-  { to: '/cleaning', label: 'Clean', step: '03' },
-  { to: '/analysis', label: 'Analyze', step: '04' },
-  { to: '/visualization', label: 'Visualize', step: '05' },
+const MAIN_LINKS = [
+  { to: '/', label: 'Home', icon: 'home', end: true },
+  { to: '/dataset', label: 'Upload', icon: 'upload' },
+  { to: '/profiling', label: 'Profile', icon: 'profile' },
+  { to: '/cleaning', label: 'Clean', icon: 'clean' },
 ]
+
+const INSIGHT_LINKS = [
+  { to: '/analysis', label: 'Analyze', icon: 'analyze' },
+  { to: '/visualization', label: 'Visualize', icon: 'visualize' },
+]
+
+const ROUTE_REQUIREMENTS = {
+  '/profiling': 'uploaded',
+  '/cleaning': 'profiled',
+  '/analysis': 'cleaned',
+  '/visualization': 'analyzed',
+}
+
+function applyWorkflowLocks(links, workflow) {
+  return links.map((link) => ({
+    ...link,
+    disabled: ROUTE_REQUIREMENTS[link.to] ? !workflow[ROUTE_REQUIREMENTS[link.to]] : false,
+  }))
+}
 
 function Sidebar() {
   const { datasetId, fileName, workflow } = useAtlas()
-
-  const workflowItems = [
-    { label: 'Uploaded', active: workflow.uploaded },
-    { label: 'Profiled', active: workflow.profiled },
-    { label: 'Cleaned', active: workflow.cleaned },
-    { label: 'Analyzed', active: workflow.analyzed },
-    { label: 'Visualized', active: workflow.visualized },
-  ]
+  const completedCount = [
+    workflow.uploaded,
+    workflow.profiled,
+    workflow.cleaned,
+    workflow.analyzed,
+    workflow.visualized,
+  ].filter(Boolean).length
 
   return (
-    <aside className="app-sidebar">
-      <div className="sidebar-panel sidebar-brand-panel">
-        <AtlasLogo compact />
+    <aside className="app-sidebar" aria-label="Primary navigation">
+      <div className="sidebar-brand-panel">
+        <NavLink to="/" className="sidebar-brand-link" aria-label="ATLAS home">
+          <AtlasLogo compact />
+          <span className="sidebar-brand-text">ATLAS</span>
+        </NavLink>
+        <span className="sidebar-collapse-button" aria-hidden="true">
+          <AtlasIcon name="chevron-left" />
+        </span>
+      </div>
+
+      <nav className="sidebar-nav-panel" data-tour="workflow-nav">
+        <SidebarSection title="Main" links={applyWorkflowLocks(MAIN_LINKS, workflow)} />
+        <SidebarSection title="Insights" links={applyWorkflowLocks(INSIGHT_LINKS, workflow)} />
+      </nav>
+
+      <div className="sidebar-status-panel">
+        <div className="sidebar-status-ring">
+          <span>{completedCount}/5</span>
+        </div>
         <div>
-          <p className="sidebar-eyebrow">ATLAS Workspace</p>
-          <h1 className="sidebar-title">Data Cleaning and Analytics</h1>
-          <p className="sidebar-copy">
-            Calm, focused workspace for uploading, profiling, cleaning, and reading datasets.
-          </p>
+          <p className="sidebar-status-title">Workflow</p>
+          <p className="sidebar-status-copy">{datasetId ? 'Dataset active' : 'No dataset loaded'}</p>
         </div>
       </div>
 
-      <nav className="sidebar-panel sidebar-nav-panel" aria-label="Primary">
-        <p className="sidebar-section-title">Workflow</p>
-        <div className="sidebar-nav-list">
-          {LINKS.map((link) => (
+      <div className="sidebar-user-panel">
+        <span className="sidebar-user-avatar">A</span>
+        <div>
+          <strong>{fileName || 'ATLAS Workspace'}</strong>
+          <span>{datasetId ? 'Backend session ready' : 'Ready to import'}</span>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function SidebarSection({ title, links }) {
+  return (
+    <section className="sidebar-section">
+      <p className="sidebar-section-title">{title}</p>
+      <div className="sidebar-nav-list">
+        {links.map((link) => {
+          const content = (
+            <>
+              <AtlasIcon name={link.icon} />
+              <span>{link.label}</span>
+            </>
+          )
+
+          if (link.disabled) {
+            return (
+              <span
+                key={link.to}
+                className="sidebar-link sidebar-link-disabled"
+                aria-disabled="true"
+                title="Finish the previous step first"
+              >
+                {content}
+              </span>
+            )
+          }
+
+          return (
             <NavLink
               key={link.to}
               to={link.to}
+              end={link.end}
               className={({ isActive }) =>
                 isActive ? 'sidebar-link sidebar-link-active' : 'sidebar-link'
               }
             >
-              <span className="sidebar-link-step">{link.step}</span>
-              <span>{link.label}</span>
+              {content}
             </NavLink>
-          ))}
-        </div>
-      </nav>
-
-      <section className="sidebar-panel sidebar-status-panel">
-        <div className="sidebar-panel-head">
-          <p className="sidebar-section-title">Dataset Status</p>
-          <span className={datasetId ? 'sidebar-live-dot on' : 'sidebar-live-dot'} />
-        </div>
-
-        <div className="sidebar-status-grid">
-          {workflowItems.map((item) => (
-            <div key={item.label} className={item.active ? 'status-tile on' : 'status-tile'}>
-              <span>{item.label}</span>
-            </div>
-          ))}
-        </div>
-
-        <div className="dataset-card-mini">
-          <p className="dataset-card-label">Active Dataset</p>
-          <strong>{fileName || 'No file loaded'}</strong>
-          <span>{datasetId ? 'Connected to backend session' : 'Upload a file to begin'}</span>
-        </div>
-      </section>
-    </aside>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 

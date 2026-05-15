@@ -23,7 +23,7 @@ function formatStatValue(value) {
 }
 
 function ProfilingPage() {
-  const { datasetId, rawProfile, fileName } = useAtlas()
+  const { datasetId, rawProfile, fileName, markWorkflowStep } = useAtlas()
 
   const profileSummary = useMemo(() => {
     const columnProfiles = rawProfile?.column_profiles ?? []
@@ -50,7 +50,7 @@ function ProfilingPage() {
   if (!datasetId || !rawProfile) {
     return (
       <div className="page-grid">
-        <section className="panel empty-panel">
+        <section className="panel empty-panel" data-tour="column-diagnostics">
           <h2>No dataset uploaded yet</h2>
           <p>Upload a dataset first, then return here for profiling details.</p>
           <Link to="/dataset" className="action-button">
@@ -73,7 +73,12 @@ function ProfilingPage() {
           <Link to="/dataset" className="ghost-button" title="Back to upload">
             <IconButtonContent icon="back" label="Back" showLabel />
           </Link>
-          <Link to="/cleaning" className="primary-button" title="Continue to clean">
+          <Link
+            to="/cleaning"
+            className="primary-button profile-continue-button"
+            onClick={() => markWorkflowStep('profiled')}
+            title="Continue to clean"
+          >
             <IconButtonContent icon="clean" label="Continue to Clean" showLabel />
           </Link>
         </div>
@@ -95,7 +100,7 @@ function ProfilingPage() {
       </section>
 
       <section className="profile-layout">
-        <main className="profile-table-panel">
+        <main className="profile-table-panel" data-tour="column-diagnostics">
           <div className="profile-panel-head">
             <div>
               <h2>Column Diagnostics</h2>

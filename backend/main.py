@@ -79,7 +79,7 @@ NULL_TEXT_TOKENS = {
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
 GEMINI_DEFAULT_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash-lite")
-AI_INSIGHTS_CACHE_VERSION = "polished-v3"
+AI_INSIGHTS_CACHE_VERSION = "polished-v4"
 GEMINI_INSIGHTS_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -1469,6 +1469,158 @@ def _parse_jsonish_text(text: str) -> object:
     return {}
 
 
+def _empty_ai_insight_sections() -> dict[str, list[str]]:
+    return {
+        "key_insights": [],
+        "trends": [],
+        "data_quality_notes": [],
+        "simple_recommendations": [],
+    }
+
+
+def _has_ai_insight_items(insights: dict[str, list[str]]) -> bool:
+    return any(insights.get(key) for key in _empty_ai_insight_sections())
+
+
+def _merge_ai_insight_sections(
+    primary: dict[str, list[str]],
+    secondary: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    return {
+        key: [*(primary.get(key) or []), *(secondary.get(key) or [])]
+        for key in _empty_ai_insight_sections()
+    }
+
+
+def _decode_json_string_fragment(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace('\\"', '"').replace("\\n", " ")
+
+
+def _find_ai_insight_section_markers(text: str) -> list[dict[str, object]]:
+    aliases = {
+        "key_insights": ("key_insights", "key insights"),
+        "trends": ("trends",),
+        "data_quality_notes": ("data_quality_notes", "data quality notes", "data_quality", "data quality"),
+        "simple_recommendations": (
+            "simple_recommendations",
+            "simple recommendations",
+            "recommendations",
+        ),
+    }
+    markers: list[dict[str, object]] = []
+
+    for key, key_aliases in aliases.items():
+        for alias in key_aliases:
+            alias_pattern = re.escape(alias)
+            alias_pattern = re.sub(r"(?:\\_|\\ |\\-)+", lambda _: r"[_\s-]+", alias_pattern)
+            match = re.search(
+                rf"""["']?{alias_pattern}["']?\s*:\s*\[""",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                markers.append(
+                    {
+                        "key": key,
+                        "index": match.start(),
+                        "content_start": match.end(),
+                    }
+                )
+                break
+
+    return sorted(markers, key=lambda marker: int(marker["index"]))
+
+
+def _extract_quoted_ai_items(segment: str) -> list[str]:
+    items: list[str] = []
+    for match in re.finditer(r'"((?:\\.|[^"\\])*)"', segment, flags=re.DOTALL):
+        text = _clean_ai_sentence(_decode_json_string_fragment(match.group(1)))
+        if text:
+            items.append(text)
+
+    if items:
+        return items
+
+    first_quote_index = segment.find('"')
+    fallback = segment[first_quote_index + 1 :] if first_quote_index >= 0 else segment
+    text = _clean_ai_sentence(fallback.strip(' \t\r\n,]}"\''))
+    return [text] if text else []
+
+
+def _extract_ai_sections_from_jsonish_text(text: str) -> dict[str, list[str]]:
+    cleaned = _strip_json_fence(text)
+    if not cleaned or "{" not in cleaned:
+        return _empty_ai_insight_sections()
+
+    parsed = _parse_jsonish_text(cleaned)
+    if isinstance(parsed, dict):
+        parsed = _unwrap_nested_insights_object(parsed)
+        parsed_insights = _parsed_object_to_insights(parsed)
+        if _has_ai_insight_items(parsed_insights):
+            return parsed_insights
+
+    markers = _find_ai_insight_section_markers(cleaned)
+    if not markers:
+        return _empty_ai_insight_sections()
+
+    insights = _empty_ai_insight_sections()
+    for index, marker in enumerate(markers):
+        next_marker = markers[index + 1] if index + 1 < len(markers) else None
+        content_start = int(marker["content_start"])
+        content_end = int(next_marker["index"]) if next_marker else len(cleaned)
+        insights[str(marker["key"])] = _extract_quoted_ai_items(cleaned[content_start:content_end])
+
+    return insights
+
+
+def _looks_like_jsonish_insight_wrapper(text: str) -> bool:
+    cleaned = text.lstrip()
+    return cleaned.startswith("{") and bool(
+        re.search(
+            r"key[_\s-]*insights|data[_\s-]*quality|recommendations|trends",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_ai_insight_sections(value: object) -> dict[str, list[str]]:
+    if isinstance(value, str):
+        return _normalize_gemini_insights(value)
+
+    if not isinstance(value, dict):
+        return _empty_ai_insight_sections()
+
+    parsed = _unwrap_nested_insights_object(value)
+    direct_insights = _parsed_object_to_insights(parsed)
+    retained = _empty_ai_insight_sections()
+    nested_insights = _empty_ai_insight_sections()
+    found_nested = False
+
+    for key, items in direct_insights.items():
+        for item in items:
+            extracted = _extract_ai_sections_from_jsonish_text(item)
+            if _has_ai_insight_items(extracted):
+                nested_insights = _merge_ai_insight_sections(nested_insights, extracted)
+                found_nested = True
+                continue
+
+            if not _looks_like_jsonish_insight_wrapper(item):
+                retained[key].append(item)
+
+    return _merge_ai_insight_sections(retained, nested_insights) if found_nested else direct_insights
+
+
+def _normalize_ai_insights_result_payload(payload: dict[str, object]) -> dict[str, object]:
+    normalized_payload = dict(payload)
+    if "insights" in normalized_payload:
+        normalized_payload["insights"] = _normalize_ai_insight_sections(normalized_payload.get("insights"))
+    return normalized_payload
+
+
 def _get_case_insensitive_value(parsed: dict[str, object], *keys: str) -> object:
     normalized_map = {
         re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_"): value
@@ -1579,6 +1731,23 @@ def _normalize_gemini_insights(text: str) -> dict[str, list[str]]:
             nested_insights = _parsed_object_to_insights(nested)
             if any(nested_insights.values()):
                 insights = nested_insights
+
+    retained_insights = _empty_ai_insight_sections()
+    nested_insights = _empty_ai_insight_sections()
+    found_nested = False
+    for key, items in insights.items():
+        for item in items:
+            extracted = _extract_ai_sections_from_jsonish_text(item)
+            if _has_ai_insight_items(extracted):
+                nested_insights = _merge_ai_insight_sections(nested_insights, extracted)
+                found_nested = True
+                continue
+
+            if not _looks_like_jsonish_insight_wrapper(item):
+                retained_insights[key].append(item)
+
+    if found_nested:
+        insights = _merge_ai_insight_sections(retained_insights, nested_insights)
 
     if not any(insights.values()) and cleaned:
         insights["key_insights"] = [_clean_ai_sentence(cleaned)]
@@ -3442,6 +3611,31 @@ def clean_dataset(dataset_id: str, payload: CleaningConfigPayload | None = None)
     }
 
 
+@app.delete("/datasets/{dataset_id}/clean")
+def reset_cleaning(dataset_id: str) -> dict[str, object]:
+    dataset = _get_dataset(dataset_id)
+    raw_df = dataset.get("raw")
+    if not isinstance(raw_df, pd.DataFrame):
+        raise HTTPException(status_code=500, detail="Dataset state is invalid")
+
+    dataset["cleaned"] = None
+    dataset["cleaning_summary"] = None
+    dataset.pop("ai_insights_cache", None)
+
+    full_dataset = _build_full_dataset(raw_df)
+
+    return {
+        "dataset_id": dataset_id,
+        "stage": "raw",
+        "columns": full_dataset["columns"],
+        "rows": full_dataset["rows"],
+        "total_rows": full_dataset["total_rows"],
+        "total_columns": full_dataset["total_columns"],
+        "approx_size_bytes": _estimate_dataframe_size_bytes(raw_df),
+        "profile": _build_profile(raw_df, preview_limit=20),
+    }
+
+
 @app.get("/datasets/{dataset_id}/analyze")
 def analyze_dataset(dataset_id: str, stage: str = "latest") -> dict[str, object]:
     dataset = _get_dataset(dataset_id)
@@ -3473,6 +3667,8 @@ async def generate_dataset_ai_insights(
     if not refresh and cache_key in cache:
         cached_payload = cache[cache_key]
         if isinstance(cached_payload, dict):
+            cached_payload = _normalize_ai_insights_result_payload(cached_payload)
+            cache[cache_key] = cached_payload
             return {
                 "dataset_id": dataset_id,
                 "stage": resolved_stage,
@@ -3544,6 +3740,7 @@ async def generate_dataset_ai_insights(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "insights": insights,
     }
+    result = _normalize_ai_insights_result_payload(result)
     cache[cache_key] = result
 
     return {

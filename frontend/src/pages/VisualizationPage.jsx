@@ -1613,7 +1613,7 @@ function WorkspaceControlPanel({
   onAddNote,
 }) {
   return (
-    <section className="visual-workspace-panel">
+    <section className="visual-workspace-panel" data-tour="dashboard-tools">
       <header className="visual-section-title">
         <div>
           <h2>Workspace Sheet</h2>
@@ -1639,10 +1639,10 @@ function WorkspaceControlPanel({
 
       {showWidgetBar ? (
         <div className="visual-widget-bar" aria-label="Add dashboard widgets">
-          <button type="button" className="visual-widget-button" onClick={onAddChart}>
+          <button type="button" className="visual-widget-button" data-tour="add-chart" onClick={onAddChart}>
             <IconButtonContent icon="visualize" label="Chart" showLabel />
           </button>
-          <button type="button" className="visual-widget-button" onClick={onAddKpi}>
+          <button type="button" className="visual-widget-button" data-tour="add-kpi" onClick={onAddKpi}>
             <IconButtonContent icon="analyze" label="KPI" showLabel />
           </button>
           <button type="button" className="visual-widget-button" onClick={onAddNote}>
@@ -3859,7 +3859,7 @@ function BlankCanvasBuilder({
   }, [])
 
   return (
-    <div className="blank-builder-shell">
+    <div className="blank-builder-shell" data-tour="dashboard-canvas">
       <main className="blank-builder-main">
         <div className="blank-canvas-toolbar" aria-label="Canvas zoom">
           <span>Canvas</span>
@@ -4203,6 +4203,7 @@ function VisualizationPage() {
     errorMessage,
     visualizeDatasetRows,
     filterDatasetRows,
+    markWorkflowStep,
   } = useAtlas()
 
   const [localDashboard, setLocalDashboard] = useState(null)
@@ -4250,6 +4251,12 @@ function VisualizationPage() {
   const [isBuilderOpen, setIsBuilderOpen] = useState(false)
   const dashboardCaptureRef = useRef(null)
   const blankCanvasRef = useRef(null)
+
+  useEffect(() => {
+    if (datasetId) {
+      markWorkflowStep('visualized')
+    }
+  }, [datasetId, markWorkflowStep])
 
   const dashboard = localDashboard ?? storedCharts
   const sourceColumns = useMemo(() => uploadedDataset.columns ?? [], [uploadedDataset.columns])
@@ -5415,7 +5422,7 @@ function VisualizationPage() {
   if (!datasetId) {
     return (
       <div className="page-grid">
-        <section className="panel empty-panel">
+        <section className="panel empty-panel" data-tour="dashboard-canvas">
           <h2>No dataset available</h2>
           <p>Upload your file first before generating visualizations.</p>
           <Link to="/dataset" className="action-button">
@@ -5570,7 +5577,7 @@ function VisualizationPage() {
           />
         </CanvasBuilderErrorBoundary>
       ) : (
-      <div ref={dashboardCaptureRef} className="visual-dashboard-capture">
+      <div ref={dashboardCaptureRef} className="visual-dashboard-capture" data-tour="dashboard-canvas">
         {presentationKpis.length > 0 ? (
           <section className="visual-kpi-grid">
             {presentationKpis.map((kpi, index) => {

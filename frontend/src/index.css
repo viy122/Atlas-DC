@@ -1,25 +1,25 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800;900&display=swap');
 
 :root {
-  --font-heading: 'Manrope', 'Segoe UI', sans-serif;
-  --font-body: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --font-heading: 'Poppins', 'Segoe UI', sans-serif;
+  --font-body: 'Poppins', 'Segoe UI', sans-serif;
 
-  --bg: #f7f8f6;
-  --bg-soft: #eef3ef;
+  --bg: #f5f7f8;
+  --bg-soft: #edf5f4;
   --surface: #ffffff;
-  --surface-soft: #fafbf9;
-  --surface-muted: #f3f6f3;
-  --ink: #1d2521;
-  --ink-soft: #47564d;
-  --muted: #718178;
-  --muted-soft: #98a59d;
-  --line: #dfe7e1;
-  --line-strong: #cbd8cf;
-  --accent: #0f766e;
-  --accent-strong: #0b5f59;
-  --accent-soft: rgba(15, 118, 110, 0.12);
-  --success: #16805f;
-  --success-soft: rgba(22, 128, 95, 0.12);
+  --surface-soft: #f9fbfc;
+  --surface-muted: #f1f5f6;
+  --ink: #07090d;
+  --ink-soft: #334155;
+  --muted: #64748b;
+  --muted-soft: #94a3b8;
+  --line: #e2e8f0;
+  --line-strong: #cbd5e1;
+  --accent: #16b8b2;
+  --accent-strong: #0f948f;
+  --accent-soft: rgba(22, 184, 178, 0.13);
+  --success: #10a778;
+  --success-soft: rgba(16, 167, 120, 0.12);
   --warning: #a76f00;
   --warning-soft: rgba(167, 111, 0, 0.12);
   --danger: #b4233a;
@@ -44,7 +44,7 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
-  background: #f7f8f6;
+  background: var(--bg);
 }
 
 body::before {

@@ -165,7 +165,7 @@ function CleaningRuleGroup({ group, children, defaultOpen = false }) {
   )
 }
 
-function SmartRecommendationPanel({ recommendations, onApply }) {
+function SmartRecommendationPanel({ recommendations }) {
   return (
     <details className="smart-recommendation-panel">
       <summary className="smart-recommendation-head">
@@ -186,17 +186,6 @@ function SmartRecommendationPanel({ recommendations, onApply }) {
       </summary>
 
       <div className="smart-recommendation-body">
-        <button
-          type="button"
-          className="primary-button smart-recommendation-apply"
-          onClick={onApply}
-          disabled={recommendations.length === 0}
-          title="Apply recommendations"
-          aria-label="Apply recommendations"
-        >
-          <IconButtonContent icon="spark" label="Apply recommendations" showLabel />
-        </button>
-
         {recommendations.length > 0 ? (
           <div className="smart-recommendation-grid">
             {recommendations.map((recommendation) => (
@@ -261,9 +250,11 @@ function CleaningPage() {
     cleanedProfile,
     cleaningSummary,
     comparison,
+    workflow,
     busyAction,
     errorMessage,
     runAutoClean,
+    resetCleaning,
     downloadDataset,
   } = useAtlas()
 
@@ -296,10 +287,15 @@ function CleaningPage() {
     runAutoClean(buildCleaningPayload())
   }
 
+  async function handleResetCleaning() {
+    await resetCleaning()
+    resetCleaningOptions()
+  }
+
   if (!datasetId || !rawProfile) {
     return (
       <div className="page-grid">
-        <section className="panel empty-panel">
+        <section className="panel empty-panel" data-tour="cleaning-rules">
           <h2>No dataset available</h2>
           <p>Upload and save a dataset first before running the cleaning pipeline.</p>
           <Link to="/dataset" className="action-button">
@@ -329,16 +325,6 @@ function CleaningPage() {
     year: 'numeric',
   }).format(new Date())
 
-  function applySmartRecommendations() {
-    setCleaningOptions((currentOptions) => ({
-      ...currentOptions,
-      ...recommendationReport.recommendedOptions,
-      fill_text_with_mode: false,
-    }))
-    setCriticalKeywordsText(recommendationReport.criticalKeywords || 'id,email')
-    setRequiredKeywordsText(recommendationReport.requiredKeywords)
-  }
-
   return (
     <div className="cleaning-workbench">
       <header className="cleaning-toolbar">
@@ -354,6 +340,15 @@ function CleaningPage() {
           <button
             type="button"
             className="ghost-button"
+            onClick={handleResetCleaning}
+            disabled={!hasCleaned || busyAction === 'resetting-cleaning'}
+            title={busyAction === 'resetting-cleaning' ? 'Resetting cleaning' : 'Reset cleaned result'}
+          >
+            <IconButtonContent icon="reset" label={busyAction === 'resetting-cleaning' ? 'Resetting' : 'Reset Cleaning'} showLabel />
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
             onClick={() => downloadDataset({ stage: 'cleaned' })}
             disabled={!hasCleaned || busyAction === 'exporting'}
             title={busyAction === 'exporting' ? 'Exporting' : 'Download cleaned CSV'}
@@ -363,7 +358,7 @@ function CleaningPage() {
           <Link to="/analysis" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'} title="Analyze">
             <IconButtonContent icon="analyze" label="Analyze" showLabel />
           </Link>
-          <Link to="/visualization" className={hasCleaned ? 'ghost-button' : 'ghost-button disabled-link'} title="Visualize">
+          <Link to="/visualization" className={workflow.analyzed ? 'ghost-button' : 'ghost-button disabled-link'} title="Visualize">
             <IconButtonContent icon="visualize" label="Visualize" showLabel />
           </Link>
         </div>
@@ -378,6 +373,7 @@ function CleaningPage() {
             onClick={handleRunCleaning}
             disabled={busyAction === 'cleaning'}
             title={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Clean all again' : 'Clean all'}
+            data-tour="run-cleaning"
           >
             <IconButtonContent icon="spark" label={busyAction === 'cleaning' ? 'Cleaning' : hasCleaned ? 'Run Again' : 'Run Cleaning'} showLabel />
           </button>
@@ -388,10 +384,9 @@ function CleaningPage() {
 
       <SmartRecommendationPanel
         recommendations={recommendationReport.recommendations}
-        onApply={applySmartRecommendations}
       />
 
-      <section className="cleaning-controls-panel">
+      <section className="cleaning-controls-panel" data-tour="cleaning-rules">
         <div className="cleaning-controls-head">
           <div>
             <h2>Cleaning Controls</h2>

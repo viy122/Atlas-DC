@@ -1,5 +1,21 @@
 function IconPath({ name }) {
   switch (name) {
+    case 'home':
+      return <path d="M4 11.5 12 5l8 6.5V20h-5v-5H9v5H4v-8.5Z" />
+    case 'search':
+      return <path d="m20 20-4.2-4.2M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z" />
+    case 'bell':
+      return <path d="M18 10a6 6 0 1 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M9.8 21h4.4" />
+    case 'help':
+      return <path d="M12 18h.01M9.2 9a3 3 0 1 1 5.2 2c-.8.7-1.4 1.1-1.8 1.8-.3.5-.4.9-.4 1.7M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+    case 'settings':
+      return <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4ZM19.4 15a1.8 1.8 0 0 0 .4 2l.1.1-2 3.4-.2-.1a1.8 1.8 0 0 0-2.1.3l-.3.2a1.8 1.8 0 0 0-.9 1.7V23h-4v-.4a1.8 1.8 0 0 0-.9-1.7l-.3-.2a1.8 1.8 0 0 0-2.1-.3l-.2.1-2-3.4.1-.1a1.8 1.8 0 0 0 .4-2l-.1-.4A1.8 1.8 0 0 0 3.6 13H3V9h.6a1.8 1.8 0 0 0 1.7-1.2l.1-.4a1.8 1.8 0 0 0-.4-2L4.9 5.3l2-3.4.2.1a1.8 1.8 0 0 0 2.1-.3l.3-.2A1.8 1.8 0 0 0 10.4 0h4a1.8 1.8 0 0 0 .9 1.5l.3.2a1.8 1.8 0 0 0 2.1.3l.2-.1 2 3.4-.1.1a1.8 1.8 0 0 0-.4 2l.1.4A1.8 1.8 0 0 0 21.4 9h.6v4h-.6a1.8 1.8 0 0 0-1.7 1.2l-.3.8Z" />
+    case 'database':
+      return <path d="M5 7c0-2 3.1-3.5 7-3.5S19 5 19 7s-3.1 3.5-7 3.5S5 9 5 7Zm0 0v5c0 2 3.1 3.5 7 3.5s7-1.5 7-3.5V7M5 12v5c0 2 3.1 3.5 7 3.5s7-1.5 7-3.5v-5" />
+    case 'chevron-left':
+      return <path d="m15 6-6 6 6 6" />
+    case 'check':
+      return <path d="m5 12 4 4L19 6" />
     case 'upload':
       return <path d="M12 16V4m0 0 4 4m-4-4-4 4M5 16v3h14v-3" />
     case 'close':
@@ -30,6 +46,8 @@ function IconPath({ name }) {
       return <path d="M5 18h14M7 15l3-4 3 2 4-6" />
     case 'back':
       return <path d="m11 5-7 7 7 7M5 12h14" />
+    case 'next':
+      return <path d="m13 5 7 7-7 7M19 12H5" />
     case 'export':
       return <path d="M12 4v9m0 0 3-3m-3 3-3-3M6 20h12a1 1 0 0 0 1-1v-4M5 15v4a1 1 0 0 0 1 1" />
     case 'image':

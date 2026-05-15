@@ -5,12 +5,13 @@ import { CompactMetric, EmptyStateMascot } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
 import { formatDataType, formatValue, totalMissing } from '../utils/formatters'
 
-function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data', iconOnly = false }) {
+function ImportDatasetButton({ busy, onFileSelect, label = 'Import Data', iconOnly = false, tourId }) {
   return (
     <label
       className={`primary-button import-button${busy ? ' is-busy' : ''}${iconOnly ? ' icon-only-button' : ''}`}
       title={busy ? 'Importing' : label}
       aria-label={busy ? 'Importing' : label}
+      data-tour={tourId}
     >
       {iconOnly ? (
         <IconButtonContent icon="upload" label={busy ? 'Importing' : label} />
@@ -61,6 +62,7 @@ function UploadPage() {
     fileName,
     uploadedDataset,
     rawProfile,
+    workflow,
     busyAction,
     errorMessage,
     uploadDataset,
@@ -81,6 +83,7 @@ function UploadPage() {
   const hasUnsavedChanges = dirtyCells.size > 0
   const canUndo = undoStack.length > 0
   const canRedo = redoStack.length > 0
+  const isUploading = busyAction === 'uploading'
 
   useEffect(() => {
     document.documentElement.classList.add('atlas-upload-locked')
@@ -246,6 +249,30 @@ function UploadPage() {
     URL.revokeObjectURL(exportUrl)
   }
 
+  async function handleDatasetUpload(file) {
+    await uploadDataset(file)
+  }
+
+  async function handleTrySampleDataset() {
+    setSaveMessage('')
+
+    try {
+      const response = await fetch('/sample_sales_dataset.csv')
+      if (!response.ok) {
+        throw new Error('Sample dataset is unavailable.')
+      }
+
+      const blob = await response.blob()
+      const sampleFile = new File([blob], 'sample_sales_dataset.csv', {
+        type: blob.type || 'text/csv',
+      })
+
+      await handleDatasetUpload(sampleFile)
+    } catch {
+      setSaveMessage('Sample dataset could not be loaded. Please import your own CSV or Excel file.')
+    }
+  }
+
   async function handleSaveEdits() {
     try {
       await saveDatasetEdits({ columns, rows: editableRows })
@@ -278,7 +305,16 @@ function UploadPage() {
         <div className="editor-toolbar upload-editor-toolbar">
           <div className="editor-toolbar__group editor-toolbar__group--compact">
             <span className="toolbar-group-label">File</span>
-            <ImportDatasetButton busy={busyAction === 'uploading'} onFileSelect={uploadDataset} label="Upload" />
+            <ImportDatasetButton busy={isUploading} onFileSelect={handleDatasetUpload} label="Import Dataset" tourId="import-dataset" />
+            <button
+              type="button"
+              className="editor-toolbar__button"
+              onClick={handleTrySampleDataset}
+              disabled={isUploading}
+              title="Try sample dataset"
+            >
+              <IconButtonContent icon="database" label="Try Sample Dataset" showLabel />
+            </button>
             <button type="button" className="editor-toolbar__button icon-only-button" onClick={resetWorkspace} disabled={!hasDataset} title="Close dataset" aria-label="Close dataset">
               <IconButtonContent icon="close" label="Close dataset" />
             </button>
@@ -317,7 +353,7 @@ function UploadPage() {
             <Link to="/profiling" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'} title="Profile">
               <IconButtonContent icon="profile" label="Profile" showLabel />
             </Link>
-            <Link to="/cleaning" className={hasDataset ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'} title="Clean">
+            <Link to="/cleaning" className={workflow.profiled ? 'editor-toolbar__button' : 'editor-toolbar__button disabled-link'} title="Clean">
               <IconButtonContent icon="clean" label="Clean" showLabel />
             </Link>
           </div>
@@ -359,7 +395,7 @@ function UploadPage() {
         ) : null}
 
         {hasDataset ? (
-          <div className="dataset-table-shell dataset-table-shell--editor upload-edit-grid">
+          <div className="dataset-table-shell dataset-table-shell--editor upload-edit-grid" data-tour="dataset-table">
             <div className="dataset-table-scroll dataset-table-scroll--editor">
               <table className="dataset-grid-table dataset-grid-table--editor editable-grid-table">
                 <thead>
@@ -415,12 +451,25 @@ function UploadPage() {
             title="No dataset loaded"
             description="Choose a CSV or Excel file. The table will appear here and can be edited before saving."
             action={(
-              <ImportDatasetButton
-                busy={busyAction === 'uploading'}
-                onFileSelect={uploadDataset}
-                label="Import Dataset"
-              />
+              <div className="upload-empty-actions">
+                <ImportDatasetButton
+                  busy={isUploading}
+                  onFileSelect={handleDatasetUpload}
+                  label="Import Dataset"
+                  tourId="import-dataset"
+                />
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={handleTrySampleDataset}
+                  disabled={isUploading}
+                  title="Try sample dataset"
+                >
+                  <IconButtonContent icon="database" label="Try Sample Dataset" showLabel />
+                </button>
+              </div>
             )}
+            tourId="dataset-table"
           />
         )}
       </section>

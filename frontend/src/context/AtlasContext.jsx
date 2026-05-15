@@ -19,6 +19,17 @@ function resolveApiBase() {
 const API_BASE = resolveApiBase()
 const AtlasContext = createContext(null)
 const LAST_DATASET_STORAGE_KEY = 'atlas:lastDatasetId'
+const WORKFLOW_STEPS = ['uploaded', 'profiled', 'cleaned', 'analyzed', 'visualized']
+
+function createInitialWorkflowProgress() {
+  return {
+    uploaded: false,
+    profiled: false,
+    cleaned: false,
+    analyzed: false,
+    visualized: false,
+  }
+}
 
 function getStoredDatasetId() {
   if (typeof window === 'undefined') {
@@ -82,6 +93,7 @@ export function AtlasProvider({ children }) {
 
   const [analysis, setAnalysis] = useState(null)
   const [charts, setCharts] = useState(null)
+  const [workflowProgress, setWorkflowProgress] = useState(createInitialWorkflowProgress)
 
   const [busyAction, setBusyAction] = useState('idle')
   const [errorMessage, setErrorMessage] = useState('')
@@ -98,6 +110,7 @@ export function AtlasProvider({ children }) {
     setComparison(null)
     setAnalysis(null)
     setCharts(null)
+    setWorkflowProgress(createInitialWorkflowProgress())
     setErrorMessage('')
     setBusyAction('idle')
   }
@@ -153,17 +166,26 @@ export function AtlasProvider({ children }) {
       setComparison(null)
       setAnalysis(null)
       setCharts(null)
+      setWorkflowProgress({
+        uploaded: true,
+        profiled: false,
+        cleaned: false,
+        analyzed: false,
+        visualized: false,
+      })
 
       await loadLatestOutputs(nextDatasetId)
+      return nextDatasetId
     } catch (error) {
       setErrorMessage(error.message)
+      return ''
     } finally {
       setBusyAction('idle')
     }
   }
 
-  async function runAutoClean(options = {}) {
-    if (!datasetId) {
+  async function runAutoClean(options = {}, targetDatasetId = datasetId) {
+    if (!targetDatasetId) {
       setErrorMessage('Upload a dataset before running cleaning.')
       return
     }
@@ -172,7 +194,7 @@ export function AtlasProvider({ children }) {
     setErrorMessage('')
 
     try {
-      const cleanPayload = await fetchJson(`/datasets/${datasetId}/clean`, {
+      const cleanPayload = await fetchJson(`/datasets/${targetDatasetId}/clean`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -183,10 +205,10 @@ export function AtlasProvider({ children }) {
       setCleaningSummary(cleanPayload.cleaning_summary)
 
       const [statePayload, rawPayload, cleanedPayload, comparisonPayload] = await Promise.all([
-        fetchJson(`/datasets/${datasetId}/state?preview_rows=20`),
-        fetchJson(`/datasets/${datasetId}/profile?stage=raw&preview_rows=20`),
-        fetchJson(`/datasets/${datasetId}/profile?stage=cleaned&preview_rows=20`),
-        fetchJson(`/datasets/${datasetId}/compare?limit=60`),
+        fetchJson(`/datasets/${targetDatasetId}/state?preview_rows=20`),
+        fetchJson(`/datasets/${targetDatasetId}/profile?stage=raw&preview_rows=20`),
+        fetchJson(`/datasets/${targetDatasetId}/profile?stage=cleaned&preview_rows=20`),
+        fetchJson(`/datasets/${targetDatasetId}/compare?limit=60`),
       ])
 
       setUploadedDataset({
@@ -201,7 +223,58 @@ export function AtlasProvider({ children }) {
       setRawProfile(rawPayload.profile)
       setCleanedProfile(cleanedPayload.profile)
       setComparison(comparisonPayload.comparison ?? null)
-      await loadLatestOutputs(datasetId)
+      await loadLatestOutputs(targetDatasetId)
+      setWorkflowProgress((currentProgress) => ({
+        ...currentProgress,
+        uploaded: true,
+        profiled: true,
+        cleaned: true,
+        analyzed: false,
+        visualized: false,
+      }))
+    } catch (error) {
+      setErrorMessage(error.message)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function resetCleaning() {
+    if (!datasetId) {
+      setErrorMessage('Upload a dataset before resetting cleaning.')
+      return
+    }
+
+    setBusyAction('resetting-cleaning')
+    setErrorMessage('')
+
+    try {
+      const payload = await fetchJson(`/datasets/${datasetId}/clean`, {
+        method: 'DELETE',
+      })
+
+      setUploadedDataset({
+        columns: payload.columns ?? [],
+        rows: payload.rows ?? [],
+      })
+      setRawProfile(payload.profile ?? rawProfile)
+      setCleanedProfile(null)
+      setCleaningSummary(null)
+      setComparison(null)
+      setAnalysis(null)
+      setCharts(null)
+      setDatasetMeta((previous) => ({
+        ...previous,
+        sizeBytes: Number(payload.approx_size_bytes) || previous.sizeBytes,
+      }))
+      setWorkflowProgress((currentProgress) => ({
+        ...currentProgress,
+        uploaded: true,
+        profiled: true,
+        cleaned: false,
+        analyzed: false,
+        visualized: false,
+      }))
     } catch (error) {
       setErrorMessage(error.message)
     } finally {
@@ -237,6 +310,13 @@ export function AtlasProvider({ children }) {
       setComparison(null)
       setAnalysis(null)
       setCharts(null)
+      setWorkflowProgress({
+        uploaded: true,
+        profiled: false,
+        cleaned: false,
+        analyzed: false,
+        visualized: false,
+      })
       setDatasetMeta((previous) => ({
         ...previous,
         sizeBytes: Number(payload.approx_size_bytes) || previous.sizeBytes,
@@ -484,6 +564,13 @@ export function AtlasProvider({ children }) {
         setComparison(comparisonPayload?.comparison ?? null)
         setAnalysis(analysisPayload.analysis ?? null)
         setCharts(chartsPayload.charts ?? null)
+        setWorkflowProgress({
+          uploaded: Boolean(statePayload.raw_profile),
+          profiled: Boolean(statePayload.cleaned_profile),
+          cleaned: Boolean(statePayload.cleaned_profile),
+          analyzed: false,
+          visualized: false,
+        })
       } catch {
         if (!cancelled) {
           clearStoredDatasetId()
@@ -497,6 +584,7 @@ export function AtlasProvider({ children }) {
           setComparison(null)
           setAnalysis(null)
           setCharts(null)
+          setWorkflowProgress(createInitialWorkflowProgress())
           setErrorMessage('')
         }
       } finally {
@@ -515,16 +603,31 @@ export function AtlasProvider({ children }) {
 
   const activeProfile = cleanedProfile ?? rawProfile
 
+  const markWorkflowStep = useCallback((step) => {
+    const stepIndex = WORKFLOW_STEPS.indexOf(step)
+    if (stepIndex === -1) {
+      return
+    }
+
+    setWorkflowProgress((currentProgress) => {
+      const nextProgress = { ...currentProgress }
+      WORKFLOW_STEPS.slice(0, stepIndex + 1).forEach((workflowStep) => {
+        nextProgress[workflowStep] = true
+      })
+      return nextProgress
+    })
+  }, [])
+
   const workflow = useMemo(
     () => ({
-      uploaded: Boolean(rawProfile),
-      profiled: Boolean(rawProfile),
-      cleaned: Boolean(cleanedProfile),
-      analyzed: Boolean(analysis),
-      visualized: Boolean(charts),
+      uploaded: Boolean(rawProfile) && workflowProgress.uploaded,
+      profiled: Boolean(rawProfile) && workflowProgress.profiled,
+      cleaned: Boolean(cleanedProfile) && workflowProgress.cleaned,
+      analyzed: Boolean(cleanedProfile) && workflowProgress.analyzed,
+      visualized: Boolean(cleanedProfile) && workflowProgress.visualized,
       dashboardReady: Boolean(analysis) && Boolean(charts),
     }),
-    [rawProfile, cleanedProfile, analysis, charts],
+    [rawProfile, cleanedProfile, analysis, charts, workflowProgress],
   )
 
   const value = {
@@ -546,6 +649,7 @@ export function AtlasProvider({ children }) {
     saveDatasetEdits,
     renameDatasetFile,
     runAutoClean,
+    resetCleaning,
     generateDashboard,
     visualizeDatasetRows,
     filterDatasetRows,
@@ -554,6 +658,7 @@ export function AtlasProvider({ children }) {
     downloadDataset,
     generateChartData,
     generateAiInsights,
+    markWorkflowStep,
     clearError,
     resetWorkspace,
   }

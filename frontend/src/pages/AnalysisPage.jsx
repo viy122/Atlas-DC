@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CompactWorkspaceBar } from '../components/CompactUI'
 import { useAtlas } from '../context/AtlasContext'
@@ -111,7 +111,7 @@ function normalizeAiItems(items) {
     return []
   }
 
-  return items.map((item) => String(item).trim()).filter(Boolean)
+  return items.map((item) => cleanAiInsightText(item)).filter(Boolean)
 }
 
 function parseJsonishText(text) {
@@ -141,35 +141,157 @@ function parseJsonishText(text) {
   }
 }
 
+function cleanAiInsightText(item) {
+  return String(item ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*(?:[-*]|\d+[.)])\s*/, '')
+    .replace(/^[,:\]}\s"]+|[,:\]}\s"]+$/g, '')
+    .trim()
+}
+
+function hasAiSectionItems(sections) {
+  return AI_INSIGHT_SECTIONS.some(({ key }) => sections[key]?.length > 0)
+}
+
+function emptyAiSections() {
+  return Object.fromEntries(AI_INSIGHT_SECTIONS.map(({ key }) => [key, []]))
+}
+
+function getDirectAiSections(source) {
+  return Object.fromEntries(
+    AI_INSIGHT_SECTIONS.map(({ key }) => [key, normalizeAiItems(source?.[key])]),
+  )
+}
+
+function decodeJsonString(value) {
+  try {
+    return JSON.parse(`"${value}"`)
+  } catch {
+    return value.replace(/\\"/g, '"').replace(/\\n/g, ' ')
+  }
+}
+
+function getInsightSectionMarkers(text) {
+  const markers = []
+
+  for (const { key, title } of AI_INSIGHT_SECTIONS) {
+    const aliases = [key, title]
+
+    for (const alias of aliases) {
+      const aliasPattern = alias
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/[_\s-]+/g, '[_\\s-]+')
+      const regex = new RegExp(`["']?${aliasPattern}["']?\\s*:\\s*\\[`, 'i')
+      const match = regex.exec(text)
+
+      if (match) {
+        markers.push({ key, index: match.index, contentStart: match.index + match[0].length })
+        break
+      }
+    }
+  }
+
+  return markers.sort((left, right) => left.index - right.index)
+}
+
+function extractQuotedItems(segment) {
+  const items = []
+  const quotedPattern = /"((?:\\.|[^"\\])*)"/g
+  let match = quotedPattern.exec(segment)
+
+  while (match) {
+    const item = cleanAiInsightText(decodeJsonString(match[1]))
+    if (item) {
+      items.push(item)
+    }
+    match = quotedPattern.exec(segment)
+  }
+
+  if (items.length > 0) {
+    return items
+  }
+
+  const firstQuoteIndex = segment.indexOf('"')
+  const fallback = firstQuoteIndex >= 0 ? segment.slice(firstQuoteIndex + 1) : segment
+  const item = cleanAiInsightText(fallback)
+  return item ? [item] : []
+}
+
+function extractAiSectionsFromJsonLikeText(text) {
+  const cleaned = String(text || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
+
+  if (!cleaned || !cleaned.includes('{')) {
+    return null
+  }
+
+  const parsed = parseJsonishText(cleaned)
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const parsedSections = getDirectAiSections(parsed)
+    if (hasAiSectionItems(parsedSections)) {
+      return parsedSections
+    }
+  }
+
+  const markers = getInsightSectionMarkers(cleaned)
+  if (markers.length === 0) {
+    return null
+  }
+
+  const sections = emptyAiSections()
+  markers.forEach((marker, index) => {
+    const nextMarker = markers[index + 1]
+    const segment = cleaned.slice(marker.contentStart, nextMarker?.index ?? cleaned.length)
+    sections[marker.key] = extractQuotedItems(segment)
+  })
+
+  return hasAiSectionItems(sections) ? sections : null
+}
+
+function mergeAiSections(primary, secondary) {
+  return Object.fromEntries(
+    AI_INSIGHT_SECTIONS.map(({ key }) => [
+      key,
+      [...(primary?.[key] ?? []), ...(secondary?.[key] ?? [])],
+    ]),
+  )
+}
+
+function isJsonLikeInsightWrapper(text) {
+  const cleaned = String(text || '').trim()
+  return cleaned.startsWith('{') && /key[_\s-]*insights|data[_\s-]*quality|recommendations|trends/i.test(cleaned)
+}
+
 function normalizeAiInsights(insights) {
   if (!insights || typeof insights !== 'object') {
     return null
   }
 
-  const normalized = Object.fromEntries(
-    AI_INSIGHT_SECTIONS.map(({ key }) => [key, normalizeAiItems(insights[key])]),
-  )
+  const normalized = getDirectAiSections(insights)
+  let retained = emptyAiSections()
+  let nestedSections = emptyAiSections()
+  let foundNestedSections = false
 
   for (const { key } of AI_INSIGHT_SECTIONS) {
-    if (normalized[key].length !== 1 || !normalized[key][0].startsWith('{')) {
-      continue
-    }
+    for (const item of normalized[key]) {
+      const extractedSections = extractAiSectionsFromJsonLikeText(item)
 
-    const parsed = parseJsonishText(normalized[key][0])
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      continue
-    }
+      if (extractedSections) {
+        nestedSections = mergeAiSections(nestedSections, extractedSections)
+        foundNestedSections = true
+        continue
+      }
 
-    const parsedSections = Object.fromEntries(
-      AI_INSIGHT_SECTIONS.map((section) => [section.key, normalizeAiItems(parsed[section.key])]),
-    )
-
-    if (AI_INSIGHT_SECTIONS.some((section) => parsedSections[section.key].length > 0)) {
-      return parsedSections
+      if (!isJsonLikeInsightWrapper(item)) {
+        retained[key].push(item)
+      }
     }
   }
 
-  return normalized
+  return foundNestedSections ? mergeAiSections(retained, nestedSections) : normalized
 }
 
 function normalizeAiErrorMessage(message) {
@@ -206,6 +328,7 @@ function AnalysisPage() {
     analysis,
     charts,
     generateAiInsights,
+    markWorkflowStep,
   } = useAtlas()
   const [aiInsightsPayload, setAiInsightsPayload] = useState(null)
   const [aiInsightsLoading, setAiInsightsLoading] = useState(false)
@@ -222,6 +345,12 @@ function AnalysisPage() {
   const currentAiPayload = aiInsightsPayload?.contextKey === aiContextKey ? aiInsightsPayload.payload : null
   const currentAiError = aiInsightsError.contextKey === aiContextKey ? aiInsightsError.message : ''
 
+  useEffect(() => {
+    if (datasetId && cleanedProfile) {
+      markWorkflowStep('analyzed')
+    }
+  }, [cleanedProfile, datasetId, markWorkflowStep])
+
   async function handleGenerateAiInsights() {
     if (!datasetId || aiInsightsLoading) {
       return
@@ -231,7 +360,7 @@ function AnalysisPage() {
     setAiInsightsError({ contextKey: aiContextKey, message: '' })
 
     try {
-      const payload = await generateAiInsights({ stage: 'latest' })
+      const payload = await generateAiInsights({ stage: 'latest', refresh: true })
       setAiInsightsPayload({ contextKey: aiContextKey, payload })
     } catch (error) {
       setAiInsightsError({
@@ -249,7 +378,7 @@ function AnalysisPage() {
   if (!datasetId) {
     return (
       <div className="page-grid">
-        <section className="surface-card empty-panel">
+        <section className="surface-card empty-panel" data-tour="ai-insights">
           <h1>No analysis context yet</h1>
           <p>Upload a dataset first so ATLAS can generate profiling, trends, and simple interpretations.</p>
           <Link to="/dataset" className="primary-button">
@@ -307,6 +436,7 @@ function AnalysisPage() {
             className="primary-button"
             onClick={handleGenerateAiInsights}
             disabled={aiInsightsLoading}
+            data-tour="generate-ai-insights"
           >
             {aiInsightsLoading ? 'Generating...' : 'Generate AI Insights'}
           </button>
@@ -337,7 +467,7 @@ function AnalysisPage() {
           role="tabpanel"
           aria-labelledby="analysis-tab-ai"
         >
-          <section className="ai-insights-panel" aria-busy={aiInsightsLoading}>
+          <section className="ai-insights-panel" aria-busy={aiInsightsLoading} data-tour="ai-insights">
             <div className="surface-card ai-insights-control">
               <div>
                 <h2>AI Insights</h2>

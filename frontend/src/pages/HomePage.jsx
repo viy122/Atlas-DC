@@ -1,110 +1,205 @@
 import { Link } from 'react-router-dom'
-import { AtlasLogo, IconButtonContent } from '../components/AtlasBrand'
-import heroImage from '../assets/hero.png'
+import { AtlasIcon, IconButtonContent } from '../components/AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
+import { formatValue, totalMissing } from '../utils/formatters'
 
-const FEATURES = [
+const WORKFLOW_STEPS = [
   {
-    title: 'Editable Dataset Workspace',
-    body: 'Import CSV or Excel files, rename the active file, edit rows, and keep the working copy ready for profiling.',
+    key: 'uploaded',
+    title: 'Upload dataset',
+    label: 'Dataset',
+    route: '/dataset',
+    description: 'Import a CSV or Excel file and inspect the table.',
   },
   {
-    title: 'Data Quality Profiling',
-    body: 'Review missing values, detected data types, uniqueness, and simplified statistics before making cleaning decisions.',
+    key: 'profiled',
+    title: 'Profile columns',
+    label: 'Profile',
+    route: '/profiling',
+    description: 'Review data types, missing cells, and field quality.',
   },
   {
-    title: 'Configurable Cleaning',
-    body: 'Choose cleaning rules, run the full pipeline, and compare original data beside the cleaned result.',
+    key: 'cleaned',
+    title: 'Clean records',
+    label: 'Clean',
+    route: '/cleaning',
+    description: 'Apply cleaning rules and compare raw vs cleaned rows.',
   },
   {
-    title: 'Analysis and Dashboards',
-    body: 'Turn cleaned records into human-readable insights and customizable chart workspaces.',
+    key: 'analyzed',
+    title: 'Analyze insights',
+    label: 'Analyze',
+    route: '/analysis',
+    description: 'Generate summaries, patterns, and data quality notes.',
+  },
+  {
+    key: 'visualized',
+    title: 'Build dashboard',
+    label: 'Visualize',
+    route: '/visualization',
+    description: 'Create KPI cards, charts, and presentation outputs.',
   },
 ]
 
-const HOW_IT_WORKS = [
-  ['Upload', 'Bring in CSV or Excel data and rename the workspace file if needed.'],
-  ['Profile', 'Check structure, quality, missing values, and simple numeric summaries.'],
-  ['Clean', 'Select rules, apply Clean All, then compare original and cleaned records.'],
-  ['Analyze', 'Read concise summaries for categories, correlations, and cleaning impact.'],
-  ['Visualize', 'Build a chart sheet with filters, custom widgets, and export-ready dashboards.'],
-]
+function getNextStep(workflow) {
+  return WORKFLOW_STEPS.find((step) => !workflow[step.key]) ?? WORKFLOW_STEPS.at(-1)
+}
+
+function getStepAvailable(step, workflow) {
+  if (step.key === 'uploaded') {
+    return true
+  }
+
+  const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.key === step.key)
+  const previousStep = WORKFLOW_STEPS[stepIndex - 1]
+  return Boolean(previousStep && workflow[previousStep.key])
+}
 
 function HomePage() {
-  const { workflow } = useAtlas()
+  const {
+    datasetId,
+    fileName,
+    uploadedDataset,
+    rawProfile,
+    cleanedProfile,
+    workflow,
+  } = useAtlas()
+
+  const completedCount = WORKFLOW_STEPS.filter((step) => workflow[step.key]).length
+  const readinessScore = Math.round((completedCount / WORKFLOW_STEPS.length) * 100)
+  const rows = rawProfile?.rows ?? uploadedDataset.rows.length
+  const columns = rawProfile?.columns_count ?? uploadedDataset.columns.length
+  const missingCells = rawProfile?.column_profiles?.length ? totalMissing(rawProfile.column_profiles) : 0
+  const nextStep = getNextStep(workflow)
+  const statusText = datasetId
+    ? `${fileName || 'Dataset'} is active`
+    : 'Import a dataset to begin'
+
+  const metrics = [
+    {
+      label: 'Rows',
+      value: rows ? formatValue(rows) : '-',
+      hint: datasetId ? 'active dataset' : 'no file yet',
+      tone: 'teal',
+    },
+    {
+      label: 'Columns',
+      value: columns ? formatValue(columns) : '-',
+      hint: 'detected fields',
+      tone: 'cyan',
+    },
+    {
+      label: 'Missing Cells',
+      value: datasetId ? formatValue(missingCells) : '-',
+      hint: cleanedProfile ? 'after cleaning' : 'raw profile',
+      tone: 'blue',
+    },
+    {
+      label: 'Readiness Score',
+      value: `${readinessScore}%`,
+      hint: `${completedCount} of ${WORKFLOW_STEPS.length} steps`,
+      tone: 'violet',
+    },
+  ]
 
   return (
-    <div className="landing-page">
-      <section className="landing-hero" style={{ '--landing-hero-image': `url(${heroImage})` }}>
-        <div className="landing-hero__overlay">
-          <AtlasLogo />
-          <p className="landing-kicker">Data Cleaning and Analytics System</p>
-          <h1>ATLAS</h1>
-          <p className="landing-hero__copy">
-            A guided workspace for preparing messy spreadsheets, explaining data quality decisions,
-            and building polished dashboard outputs from cleaned datasets.
-          </p>
-          <div className="landing-actions">
-            <Link to="/dataset" className="primary-button">
-              <IconButtonContent icon="upload" label="Start with a dataset" showLabel />
+    <div className="dashboard-page">
+      <section className="dashboard-welcome-card">
+        <div className="dashboard-welcome-copy">
+          <h2>Welcome back, Analyst!</h2>
+          <p>{statusText}. Keep moving through the ATLAS workflow until the dashboard is ready.</p>
+          <div className="dashboard-welcome-actions">
+            <Link to="/dataset" className="dashboard-hero-button dashboard-hero-button--dark">
+              <IconButtonContent icon="upload" label={datasetId ? 'Replace Dataset' : 'Import Dataset'} showLabel />
             </Link>
-            <Link to="/visualization" className={workflow.uploaded ? 'ghost-button landing-ghost-button' : 'ghost-button landing-ghost-button disabled-link'}>
-              <IconButtonContent icon="visualize" label="Open dashboard" showLabel />
+            <Link
+              to={nextStep.route}
+              className={getStepAvailable(nextStep, workflow) ? 'dashboard-hero-button' : 'dashboard-hero-button disabled-link'}
+            >
+              <IconButtonContent icon={nextStep.key === 'visualized' ? 'visualize' : 'next'} label={nextStep.label} showLabel />
             </Link>
           </div>
         </div>
-      </section>
-
-      <section className="landing-overview">
-        <article>
-          <span>System Overview</span>
-          <h2>One workflow from raw file to presentation-ready output.</h2>
-          <p>
-            ATLAS keeps upload, profiling, cleaning, analysis, visualization, and reporting in one
-            connected flow so each step uses the same active dataset context.
-          </p>
-        </article>
-      </section>
-
-      <section className="landing-section">
-        <div className="landing-section__head">
-          <span>Features</span>
-          <h2>Built for repeatable data preparation.</h2>
-        </div>
-        <div className="landing-feature-grid">
-          {FEATURES.map((feature) => (
-            <article key={feature.title}>
-              <h3>{feature.title}</h3>
-              <p>{feature.body}</p>
-            </article>
-          ))}
+        <div className="dashboard-welcome-art" aria-hidden="true">
+          <AtlasIcon name="database" />
         </div>
       </section>
 
-      <details className="landing-disclosure">
-        <summary>
-          <span>How It Works</span>
-          <strong>Workflow steps</strong>
-        </summary>
-        <div className="landing-steps">
-          {HOW_IT_WORKS.map(([title, body], index) => (
-            <article key={title}>
-              <em>{String(index + 1).padStart(2, '0')}</em>
-              <h3>{title}</h3>
-              <p>{body}</p>
-            </article>
-          ))}
-        </div>
-      </details>
-
-      <section className="landing-cta">
+      <section className="dashboard-section-head">
         <div>
-          <span>Ready To Begin</span>
-          <h2>Load a dataset and let ATLAS guide the preparation flow.</h2>
+          <h2>Your ATLAS Journey</h2>
+          <p>Track dataset preparation and unlock each workspace in order.</p>
         </div>
-        <Link to="/dataset" className="primary-button">
-          <IconButtonContent icon="upload" label="Import data" showLabel />
-        </Link>
+      </section>
+
+      <section className="dashboard-metric-grid" aria-label="Dataset summary">
+        {metrics.map((metric) => (
+          <article key={metric.label} className={`dashboard-metric-card dashboard-metric-card--${metric.tone}`}>
+            <span className="dashboard-metric-art">
+              <AtlasIcon name={metric.tone === 'violet' ? 'spark' : metric.tone === 'blue' ? 'clean' : 'database'} />
+            </span>
+            <div>
+              <small>{metric.hint}</small>
+              <strong>{metric.value}</strong>
+              <span>{metric.label}</span>
+            </div>
+          </article>
+        ))}
+      </section>
+
+      <section className="dashboard-lower-grid">
+        <article className="dashboard-panel dashboard-recommend-panel">
+          <header>
+            <h2>Recommended For You</h2>
+            <Link to={nextStep.route} className={getStepAvailable(nextStep, workflow) ? 'dashboard-view-button' : 'dashboard-view-button disabled-link'}>
+              View
+            </Link>
+          </header>
+
+          <div className="dashboard-recommend-list">
+            {WORKFLOW_STEPS.map((step, index) => {
+              const isDone = workflow[step.key]
+              const isAvailable = getStepAvailable(step, workflow)
+              const className = [
+                'dashboard-task-card',
+                isDone ? 'dashboard-task-card--done' : '',
+                !isAvailable ? 'dashboard-task-card--locked' : '',
+              ].filter(Boolean).join(' ')
+
+              return (
+                <article key={step.key} className={className}>
+                  <span className="dashboard-task-icon">{String(index + 1).padStart(2, '0')}</span>
+                  <div>
+                    <h3>{step.title}</h3>
+                    <p>{step.description}</p>
+                    <div className="dashboard-task-tags">
+                      <span>{isDone ? 'Done' : isAvailable ? 'Available' : 'Locked'}</span>
+                      <span>{step.label}</span>
+                    </div>
+                  </div>
+                  <Link to={step.route} className={isAvailable ? 'dashboard-task-action' : 'dashboard-task-action disabled-link'}>
+                    {isDone ? 'Review' : 'Open'}
+                  </Link>
+                </article>
+              )
+            })}
+          </div>
+        </article>
+
+        <aside className="dashboard-panel dashboard-completeness-panel">
+          <h2>Workflow Completeness</h2>
+          <div className="dashboard-score-ring" style={{ '--score': `${readinessScore}%` }}>
+            <strong>{readinessScore}%</strong>
+          </div>
+          <div className="dashboard-check-list">
+            {WORKFLOW_STEPS.map((step) => (
+              <div key={`check-${step.key}`} className={workflow[step.key] ? 'is-complete' : ''}>
+                <span />
+                {step.label}
+              </div>
+            ))}
+          </div>
+        </aside>
       </section>
     </div>
   )
