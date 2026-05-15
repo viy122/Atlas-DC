@@ -4,7 +4,9 @@ import { AtlasIcon, IconButtonContent } from './AtlasBrand'
 
 const TOUR_STORAGE_KEY = 'atlas:compact-tour-complete'
 const TOUR_TARGET_PADDING = 8
-const TOUR_RENDER_DELAY = 140
+const TOUR_RENDER_DELAY = 90
+const TOUR_SCROLL_SETTLE_DELAY = 260
+const TOUR_TARGET_RETRY_LIMIT = 8
 
 function DatasetPill({ name, fallback = 'No dataset', className = '' }) {
   return (
@@ -133,8 +135,10 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
   const [isOpen, setIsOpen] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
   const [targetRect, setTargetRect] = useState(null)
+  const [isSettling, setIsSettling] = useState(false)
   const [showMascot, setShowMascot] = useState(true)
   const activeTargetRef = useRef(null)
+  const targetUpdateFrameRef = useRef(null)
   const currentStep = steps[stepIndex]
   const isLastStep = stepIndex === steps.length - 1
 
@@ -168,6 +172,7 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
     if (!target) {
       clearActiveTarget()
       setTargetRect(null)
+      setIsSettling(false)
       return
     }
 
@@ -191,13 +196,26 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
       width: Math.max(0, right - left),
       height: Math.max(0, bottom - top),
     })
+    setIsSettling(false)
   }, [clearActiveTarget, findTarget])
+
+  const scheduleTargetRectUpdate = useCallback(() => {
+    if (targetUpdateFrameRef.current) {
+      window.cancelAnimationFrame(targetUpdateFrameRef.current)
+    }
+
+    targetUpdateFrameRef.current = window.requestAnimationFrame(() => {
+      targetUpdateFrameRef.current = null
+      updateTargetRect()
+    })
+  }, [updateTargetRect])
 
   useEffect(() => {
     if (restartToken > 0) {
       const timer = window.setTimeout(() => {
         clearActiveTarget()
         setTargetRect(null)
+        setIsSettling(true)
         setStepIndex(0)
         setIsOpen(true)
       }, 0)
@@ -217,21 +235,31 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
     const targetPath = currentStep?.path
     if (targetPath && location.pathname !== targetPath) {
       clearActiveTarget()
-      const timer = window.setTimeout(() => setTargetRect(null), 0)
+      setIsSettling(true)
       navigate(targetPath)
-      return () => window.clearTimeout(timer)
+      return undefined
     }
 
     const timers = []
-    timers.push(window.setTimeout(() => {
+    const resolveTarget = (attempt = 0) => {
       const target = findTarget()
 
       if (target) {
         target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+        timers.push(window.setTimeout(scheduleTargetRectUpdate, TOUR_SCROLL_SETTLE_DELAY))
+        return
       }
 
-      timers.push(window.setTimeout(updateTargetRect, TOUR_RENDER_DELAY))
-    }, TOUR_RENDER_DELAY))
+      if (attempt < TOUR_TARGET_RETRY_LIMIT) {
+        timers.push(window.setTimeout(() => resolveTarget(attempt + 1), TOUR_RENDER_DELAY))
+        return
+      }
+
+      scheduleTargetRectUpdate()
+    }
+
+    setIsSettling(true)
+    timers.push(window.setTimeout(() => resolveTarget(), TOUR_RENDER_DELAY))
 
     return () => {
       timers.forEach((timer) => window.clearTimeout(timer))
@@ -243,7 +271,7 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
     isOpen,
     location.pathname,
     navigate,
-    updateTargetRect,
+    scheduleTargetRectUpdate,
   ])
 
   useEffect(() => {
@@ -251,16 +279,21 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
       return undefined
     }
 
-    window.addEventListener('resize', updateTargetRect)
-    window.addEventListener('scroll', updateTargetRect, true)
+    window.addEventListener('resize', scheduleTargetRectUpdate)
+    window.addEventListener('scroll', scheduleTargetRectUpdate, true)
 
     return () => {
-      window.removeEventListener('resize', updateTargetRect)
-      window.removeEventListener('scroll', updateTargetRect, true)
+      window.removeEventListener('resize', scheduleTargetRectUpdate)
+      window.removeEventListener('scroll', scheduleTargetRectUpdate, true)
     }
-  }, [isOpen, updateTargetRect])
+  }, [isOpen, scheduleTargetRectUpdate])
 
-  useEffect(() => () => clearActiveTarget(), [clearActiveTarget])
+  useEffect(() => () => {
+    if (targetUpdateFrameRef.current) {
+      window.cancelAnimationFrame(targetUpdateFrameRef.current)
+    }
+    clearActiveTarget()
+  }, [clearActiveTarget])
 
   if (!isOpen) {
     return null
@@ -275,18 +308,24 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
 
     clearActiveTarget()
     setTargetRect(null)
+    setIsSettling(false)
     setIsOpen(false)
     onClose?.({ completed, mode })
   }
 
   function goToStep(nextIndex) {
     clearActiveTarget()
-    setTargetRect(null)
+    setIsSettling(true)
     setStepIndex(Math.min(Math.max(nextIndex, 0), steps.length - 1))
   }
 
   return (
-    <div className="baby-tour-overlay" role="dialog" aria-modal="true" aria-label="ATLAS guided tour">
+    <div
+      className={`baby-tour-overlay${isSettling ? ' baby-tour-overlay--settling' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="ATLAS guided tour"
+    >
       {targetRect ? (
         <>
           <div className="baby-tour-overlay__scrim baby-tour-overlay__scrim--top" style={{ height: targetRect.top }} />
@@ -334,13 +373,16 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
           <h2>{currentStep.title}</h2>
           <p>{currentStep.text}</p>
         </div>
+        <div className="baby-tour-progress" aria-hidden="true">
+          <span style={{ width: `${((stepIndex + 1) / steps.length) * 100}%` }} />
+        </div>
         <footer>
           <button type="button" className="ghost-button" onClick={() => closeTour()}>Skip</button>
           <button
             type="button"
             className="ghost-button"
             onClick={() => goToStep(stepIndex - 1)}
-            disabled={stepIndex === 0}
+            disabled={stepIndex === 0 || isSettling}
           >
             Back
           </button>
@@ -348,6 +390,7 @@ function BabyAtlasTour({ restartToken = 0, mode = 'standard', onClose }) {
             type="button"
             className="primary-button"
             onClick={() => (isLastStep ? closeTour({ completed: true }) : goToStep(stepIndex + 1))}
+            disabled={isSettling}
           >
             <IconButtonContent
               icon={isLastStep && isDemoMode ? 'upload' : isLastStep ? 'save' : 'next'}

@@ -49,7 +49,25 @@ export function formatDateTime(value) {
   }).format(date)
 }
 
-export function formatDataType(dtype = '') {
+export function formatDataType(dtype = '', semanticType = '') {
+  const semantic = String(semanticType || '').toLowerCase()
+
+  if (semantic === 'currency') {
+    return 'CURRENCY'
+  }
+
+  if (semantic === 'number') {
+    return 'NUMBER'
+  }
+
+  if (semantic === 'date') {
+    return 'DATETIME'
+  }
+
+  if (semantic === 'text') {
+    return 'STRING'
+  }
+
   const normalized = String(dtype).toLowerCase()
 
   if (normalized.includes('int') || normalized.includes('float') || normalized.includes('number')) {

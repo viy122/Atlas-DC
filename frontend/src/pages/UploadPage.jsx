@@ -56,12 +56,46 @@ function normalizeCsvValue(value) {
   return text
 }
 
+const COLUMN_TYPE_OPTIONS = [
+  { value: '', label: 'Auto' },
+  { value: 'text', label: 'Text' },
+  { value: 'number', label: 'Number' },
+  { value: 'currency', label: 'Currency' },
+  { value: 'date', label: 'Date' },
+]
+
+function getColumnTypeValue(profile) {
+  const semanticType = String(profile?.semantic_type || '').toLowerCase()
+  if (semanticType) {
+    return semanticType
+  }
+
+  return ''
+}
+
+function getColumnTypeClass(profile, overrideValue) {
+  const semanticType = overrideValue || profile?.semantic_type
+  return formatDataType(profile?.dtype, semanticType).toLowerCase()
+}
+
+function formatColumnTypeLabel(type) {
+  const normalized = String(type || '').toUpperCase()
+  if (normalized === 'DATETIME') {
+    return 'DATE'
+  }
+  if (normalized === 'STRING') {
+    return 'TEXT'
+  }
+  return normalized || 'AUTO'
+}
+
 function UploadPage() {
   const {
     datasetId,
     fileName,
     uploadedDataset,
     rawProfile,
+    cleanedProfile,
     workflow,
     busyAction,
     errorMessage,
@@ -77,6 +111,7 @@ function UploadPage() {
   const [saveMessage, setSaveMessage] = useState('')
   const [undoStack, setUndoStack] = useState([])
   const [redoStack, setRedoStack] = useState([])
+  const [columnTypeOverrides, setColumnTypeOverrides] = useState({})
 
   const columns = uploadedDataset.columns
   const hasDataset = Boolean(datasetId)
@@ -84,6 +119,7 @@ function UploadPage() {
   const canUndo = undoStack.length > 0
   const canRedo = redoStack.length > 0
   const isUploading = busyAction === 'uploading'
+  const activeProfile = cleanedProfile ?? rawProfile
 
   useEffect(() => {
     document.documentElement.classList.add('atlas-upload-locked')
@@ -96,15 +132,15 @@ function UploadPage() {
   }, [])
 
   const columnProfilesByName = useMemo(
-    () => new Map((rawProfile?.column_profiles ?? []).map((column) => [column.name, column])),
-    [rawProfile],
+    () => new Map((activeProfile?.column_profiles ?? []).map((column) => [column.name, column])),
+    [activeProfile],
   )
   const datasetSummary = useMemo(() => {
-    const columnProfiles = rawProfile?.column_profiles ?? []
+    const columnProfiles = activeProfile?.column_profiles ?? []
     const typeCounts = columnProfiles.reduce(
       (counts, column) => {
-        const type = formatDataType(column.dtype)
-        if (type === 'NUMBER') {
+        const type = formatDataType(column.dtype, column.semantic_type)
+        if (type === 'NUMBER' || type === 'CURRENCY') {
           counts.numeric += 1
         } else if (type === 'DATETIME') {
           counts.date += 1
@@ -118,12 +154,12 @@ function UploadPage() {
     )
 
     return {
-      rows: rawProfile?.rows ?? uploadedDataset.rows.length,
-      columns: rawProfile?.columns_count ?? columns.length,
+      rows: activeProfile?.rows ?? uploadedDataset.rows.length,
+      columns: activeProfile?.columns_count ?? columns.length,
       missing: columnProfiles.length ? totalMissing(columnProfiles) : null,
       ...typeCounts,
     }
-  }, [columns.length, rawProfile, uploadedDataset.rows.length])
+  }, [activeProfile, columns.length, uploadedDataset.rows.length])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -133,6 +169,18 @@ function UploadPage() {
     setUndoStack([])
     setRedoStack([])
   }, [uploadedDataset.rows])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setColumnTypeOverrides(
+      Object.fromEntries(
+        (activeProfile?.column_profiles ?? [])
+          .map((profile) => [profile.name, getColumnTypeValue(profile)])
+          .filter(([, type]) => Boolean(type)),
+      ),
+    )
+  }, [activeProfile])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -177,6 +225,19 @@ function UploadPage() {
     )
   }
 
+  function updateColumnType(column, value) {
+    setColumnTypeOverrides((currentOverrides) => {
+      const nextOverrides = { ...currentOverrides }
+      if (value) {
+        nextOverrides[column] = value
+      } else {
+        delete nextOverrides[column]
+      }
+      return nextOverrides
+    })
+    markDirty(`type:${column}`)
+  }
+
   function addRow() {
     const nextRow = Object.fromEntries(columns.map((column) => [column, '']))
     setRowsWithHistory((currentRows) => [...currentRows, nextRow], `${editableRows.length}:__row`)
@@ -191,6 +252,13 @@ function UploadPage() {
 
   function resetEdits() {
     setRowsWithHistory(() => cloneRows(uploadedDataset.rows), '__reset')
+    setColumnTypeOverrides(
+      Object.fromEntries(
+        (activeProfile?.column_profiles ?? [])
+          .map((profile) => [profile.name, getColumnTypeValue(profile)])
+          .filter(([, type]) => Boolean(type)),
+      ),
+    )
   }
 
   function undoEdit() {
@@ -275,7 +343,7 @@ function UploadPage() {
 
   async function handleSaveEdits() {
     try {
-      await saveDatasetEdits({ columns, rows: editableRows })
+      await saveDatasetEdits({ columns, rows: editableRows, columnTypeOverrides })
       setDirtyCells(new Set())
       setUndoStack([])
       setRedoStack([])
@@ -403,12 +471,28 @@ function UploadPage() {
                     <th className="row-index-col">#</th>
                     {columns.map((column) => {
                       const profile = columnProfilesByName.get(column)
+                      const selectedType = columnTypeOverrides[column] ?? ''
+                      const detectedType = formatDataType(profile?.dtype, profile?.semantic_type)
+                      const detectedTypeLabel = formatColumnTypeLabel(detectedType)
 
                       return (
                         <th key={column}>
                           <span className="column-title">{column}</span>
                           <span className="column-meta">
-                            <em>{formatDataType(profile?.dtype)}</em>
+                            <select
+                              className={`column-type-select column-type-select--${getColumnTypeClass(profile, selectedType)}`}
+                              value={selectedType}
+                              onChange={(event) => updateColumnType(column, event.target.value)}
+                              aria-label={`${column} data type`}
+                              title={`Detected as ${detectedTypeLabel}. Choose another type to override.`}
+                            >
+                              <option value="">{detectedTypeLabel}</option>
+                              {COLUMN_TYPE_OPTIONS.slice(1).map((option) => (
+                                <option key={`${column}-${option.value}`} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
                             <small>{profile?.missing_values ?? 0} missing</small>
                           </span>
                         </th>

@@ -3,7 +3,7 @@ import { AtlasIcon, AtlasLogo } from './AtlasBrand'
 import { useAtlas } from '../context/AtlasContext'
 
 const MAIN_LINKS = [
-  { to: '/', label: 'Home', icon: 'home', end: true },
+  { to: '/dashboard', label: 'Home', icon: 'home', end: true },
   { to: '/dataset', label: 'Upload', icon: 'upload' },
   { to: '/profiling', label: 'Profile', icon: 'profile' },
   { to: '/cleaning', label: 'Clean', icon: 'clean' },
@@ -28,7 +28,7 @@ function applyWorkflowLocks(links, workflow) {
   }))
 }
 
-function Sidebar() {
+function Sidebar({ userName = 'ATLAS User' }) {
   const { datasetId, fileName, workflow } = useAtlas()
   const completedCount = [
     workflow.uploaded,
@@ -41,7 +41,7 @@ function Sidebar() {
   return (
     <aside className="app-sidebar" aria-label="Primary navigation">
       <div className="sidebar-brand-panel">
-        <NavLink to="/" className="sidebar-brand-link" aria-label="ATLAS home">
+        <NavLink to="/dashboard" className="sidebar-brand-link" aria-label="ATLAS home">
           <AtlasLogo compact />
           <span className="sidebar-brand-text">ATLAS</span>
         </NavLink>
@@ -66,14 +66,19 @@ function Sidebar() {
       </div>
 
       <div className="sidebar-user-panel">
-        <span className="sidebar-user-avatar">A</span>
+        <span className="sidebar-user-avatar">{getInitials(userName)}</span>
         <div>
-          <strong>{fileName || 'ATLAS Workspace'}</strong>
-          <span>{datasetId ? 'Backend session ready' : 'Ready to import'}</span>
+          <strong>{userName}</strong>
+          <span>{datasetId ? fileName || 'Dataset active' : 'Ready to import'}</span>
         </div>
       </div>
     </aside>
   )
+}
+
+function getInitials(name = '') {
+  const parts = String(name || 'A').trim().split(/\s+/).filter(Boolean)
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'A'
 }
 
 function SidebarSection({ title, links }) {

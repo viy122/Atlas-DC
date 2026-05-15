@@ -106,8 +106,8 @@ function HomePage() {
     <div className="dashboard-page">
       <section className="dashboard-welcome-card">
         <div className="dashboard-welcome-copy">
-          <h2>Welcome back, Analyst!</h2>
-          <p>{statusText}. Keep moving through the ATLAS workflow until the dashboard is ready.</p>
+          <h2>Workspace overview</h2>
+          <p>{statusText}. Monitor preparation status, data quality, and the next required workflow action.</p>
           <div className="dashboard-welcome-actions">
             <Link to="/dataset" className="dashboard-hero-button dashboard-hero-button--dark">
               <IconButtonContent icon="upload" label={datasetId ? 'Replace Dataset' : 'Import Dataset'} showLabel />
@@ -127,8 +127,8 @@ function HomePage() {
 
       <section className="dashboard-section-head">
         <div>
-          <h2>Your ATLAS Journey</h2>
-          <p>Track dataset preparation and unlock each workspace in order.</p>
+          <h2>Workflow status</h2>
+          <p>Track dataset preparation and move through each workspace in order.</p>
         </div>
       </section>
 
@@ -150,7 +150,7 @@ function HomePage() {
       <section className="dashboard-lower-grid">
         <article className="dashboard-panel dashboard-recommend-panel">
           <header>
-            <h2>Recommended For You</h2>
+            <h2>Workflow queue</h2>
             <Link to={nextStep.route} className={getStepAvailable(nextStep, workflow) ? 'dashboard-view-button' : 'dashboard-view-button disabled-link'}>
               View
             </Link>

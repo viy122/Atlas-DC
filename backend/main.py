@@ -126,6 +126,7 @@ class GeminiAPIError(Exception):
 class DatasetUpdatePayload(BaseModel):
     columns: list[str] = Field(default_factory=list, min_length=1)
     rows: list[dict[str, object]] = Field(default_factory=list)
+    column_type_overrides: dict[str, str] | None = None
 
 
 class DatasetRenamePayload(BaseModel):
@@ -180,6 +181,7 @@ class CleaningConfigPayload(BaseModel):
     fill_text_with_mode: bool | None = None
     critical_keywords: list[str] | None = None
     required_keywords: list[str] | None = None
+    column_type_overrides: dict[str, str] | None = None
     required_missing_drop_threshold: float | None = Field(default=None, ge=0, le=1)
     numeric_skew_threshold: float | None = Field(default=None, ge=0)
 
@@ -372,8 +374,13 @@ def _estimate_dataframe_size_bytes(df: pd.DataFrame) -> int:
     return int(_get_user_visible_dataframe(df).memory_usage(deep=True).sum())
 
 
-def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object]:
+def _build_profile(
+    df: pd.DataFrame,
+    preview_limit: int = 5,
+    semantic_types: dict[str, str] | None = None,
+) -> dict[str, object]:
     df = _get_user_visible_dataframe(df)
+    semantic_types = semantic_types or {}
     column_profiles: list[dict[str, object]] = []
     basic_statistics: list[dict[str, object]] = []
 
@@ -384,6 +391,7 @@ def _build_profile(df: pd.DataFrame, preview_limit: int = 5) -> dict[str, object
         profile: dict[str, object] = {
             "name": column,
             "dtype": str(series.dtype),
+            "semantic_type": semantic_types.get(str(column)),
             "missing_values": missing_values,
             "missing_percent": _round_or_none((missing_values / len(series)) * 100 if len(series) else 0, 2),
             "non_null_values": non_null_values,
@@ -505,15 +513,16 @@ DEFAULT_CLEANING_CONFIG: dict[str, object] = {
     "placeholder_null_tokens": tuple(NULL_TEXT_TOKENS),
     "critical_keywords": ("id", "email"),
     "required_keywords": (),
-    "date_keywords": ("date", "time", "created", "updated", "timestamp"),
+    "date_keywords": ("date", "time", "day", "month", "year", "created", "updated", "timestamp", "birth", "birthdate", "birthday", "dob"),
     "name_label_keywords": ("name", "label", "city", "department"),
-    "protected_text_keywords": ("email", "username", "id", "code", "acronym"),
-    "future_date_keywords": ("birth", "dob"),
+    "protected_text_keywords": ("email", "username", "id", "code", "acronym", "phone", "mobile", "zip", "postal"),
+    "future_date_keywords": ("birth", "birthdate", "birthday", "dob"),
     "numeric_range_rules": {"age": {"min": 0}},
     "fill_text_with_mode": False,
+    "column_type_overrides": {},
     "required_missing_drop_threshold": None,
-    "datetime_parse_ratio": 0.65,
-    "numeric_like_ratio": 0.8,
+    "datetime_parse_ratio": 0.6,
+    "numeric_like_ratio": 0.65,
     "numeric_skew_threshold": 1.0,
 }
 
@@ -540,9 +549,66 @@ def _sanitize_numeric_strings(series: pd.Series) -> pd.Series:
     return (
         series.astype("string")
         .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
         .str.replace(r"[\$€£₱]", "", regex=True)
         .str.replace(r"\s+", "", regex=True)
     )
+
+
+def _parse_datetime_series(series: pd.Series) -> pd.Series:
+    try:
+        return pd.to_datetime(series, errors="coerce", format="mixed")
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, errors="coerce")
+
+
+def _date_pattern_ratio(series: pd.Series) -> float:
+    values = series.dropna().astype("string").str.strip()
+    if values.empty:
+        return 0.0
+
+    sample = values.head(40)
+    date_pattern = (
+        r"(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4})|"
+        r"(?:[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})|"
+        r"(?:\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})"
+    )
+    return float(sample.str.contains(date_pattern, regex=True, case=False).mean())
+
+
+def _numeric_text_ratio(series: pd.Series) -> float:
+    values = series.dropna()
+    if values.empty:
+        return 0.0
+
+    parsed_values = pd.to_numeric(_sanitize_numeric_strings(values), errors="coerce")
+    return float(parsed_values.notna().sum()) / float(len(values))
+
+
+def _normalize_type_override(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "string": "text",
+        "text": "text",
+        "category": "text",
+        "categorical": "text",
+        "number": "number",
+        "numeric": "number",
+        "currency": "currency",
+        "money": "currency",
+        "date": "date",
+        "datetime": "date",
+        "time": "date",
+    }
+    return aliases.get(normalized)
+
+
+def _is_whole_number_series(series: pd.Series) -> bool:
+    numeric_values = pd.to_numeric(series.dropna(), errors="coerce").dropna()
+    if numeric_values.empty:
+        return False
+
+    return bool(np.isclose(numeric_values, np.round(numeric_values)).all())
 
 
 def _is_sequential_datetime(series: pd.Series) -> bool:
@@ -571,6 +637,8 @@ def _clean_dataframe(
     date_keywords = tuple(cleaning_config["date_keywords"])  # type: ignore[arg-type]
     name_label_keywords = tuple(cleaning_config["name_label_keywords"])  # type: ignore[arg-type]
     future_date_keywords = tuple(cleaning_config["future_date_keywords"])  # type: ignore[arg-type]
+    column_type_overrides = cleaning_config.get("column_type_overrides")
+    column_type_overrides = column_type_overrides if isinstance(column_type_overrides, dict) else {}
     should_normalize_nulls = bool(cleaning_config["normalize_placeholder_nulls"])
     should_standardize_text = bool(cleaning_config["standardize_text"])
     should_convert_datetimes = bool(cleaning_config["convert_datetime_columns"])
@@ -645,23 +713,94 @@ def _clean_dataframe(
             cleaned_df[column] = normalized_series
 
     converted_columns: list[dict[str, str]] = []
+    applied_type_overrides: dict[str, str] = {}
+    manual_override_columns: set[str] = set()
+
+    for column, override_type in column_type_overrides.items():
+        if column not in cleaned_df.columns:
+            continue
+
+        column_name = str(column)
+        normalized_override = _normalize_type_override(override_type)
+        if not normalized_override:
+            continue
+
+        manual_override_columns.add(column_name)
+        applied_type_overrides[column_name] = normalized_override
+
+        if normalized_override == "text":
+            cleaned_df[column] = cleaned_df[column].astype("string")
+            converted_columns.append(
+                {
+                    "column": column_name,
+                    "to_type": "text",
+                    "new_dtype": str(cleaned_df[column].dtype),
+                    "source": "manual",
+                }
+            )
+            continue
+
+        if normalized_override == "date":
+            converted_series = _parse_datetime_series(cleaned_df[column])
+            failed_mask = cleaned_df[column].notna() & converted_series.isna()
+            failed_rows = _flag_rows(failed_mask, "invalid manual datetime nullified", column_name)
+            flagged_counts["conversion"] += failed_rows
+            _add_validation_error(column_name, "invalid manual datetime values were nullified", failed_rows)
+
+            cleaned_df[column] = converted_series
+            converted_columns.append(
+                {
+                    "column": column_name,
+                    "to_type": "datetime",
+                    "new_dtype": str(cleaned_df[column].dtype),
+                    "source": "manual",
+                }
+            )
+            continue
+
+        sanitized_series = _sanitize_numeric_strings(cleaned_df[column])
+        converted_series = pd.to_numeric(sanitized_series, errors="coerce")
+        failed_mask = cleaned_df[column].notna() & converted_series.isna()
+        failed_rows = _flag_rows(failed_mask, f"invalid manual {normalized_override} nullified", column_name)
+        flagged_counts["conversion"] += failed_rows
+        _add_validation_error(column_name, f"invalid manual {normalized_override} values were nullified", failed_rows)
+
+        cleaned_df[column] = converted_series
+        converted_columns.append(
+            {
+                "column": column_name,
+                "to_type": "currency" if normalized_override == "currency" else "numeric",
+                "new_dtype": str(cleaned_df[column].dtype),
+                "source": "manual",
+            }
+        )
 
     # Rule 3: convert trusted date-like columns, coercing unparseable values to null and flagging them.
     if should_convert_datetimes:
-        for column in list(cleaned_df.columns):
+        date_hint_keywords = (*date_keywords, *future_date_keywords)
+        for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
             column_name = str(column)
-            if not _column_matches_keywords(column_name, date_keywords):
+            if column_name in manual_override_columns:
                 continue
-            if pd.api.types.is_datetime64_any_dtype(cleaned_df[column]):
-                continue
-
             source_non_null = int(cleaned_df[column].notna().sum())
             if source_non_null == 0:
                 continue
 
-            converted_series = pd.to_datetime(cleaned_df[column], errors="coerce")
+            has_date_name_hint = _column_matches_keywords(column_name, date_hint_keywords)
+            pattern_ratio = _date_pattern_ratio(cleaned_df[column])
+            if not has_date_name_hint and pattern_ratio < 0.5:
+                continue
+            if not has_date_name_hint and _numeric_text_ratio(cleaned_df[column]) >= 0.9:
+                continue
+
+            converted_series = _parse_datetime_series(cleaned_df[column])
             parse_ratio = float(converted_series.notna().sum()) / float(source_non_null)
-            if parse_ratio < float(cleaning_config["datetime_parse_ratio"]):
+            required_parse_ratio = (
+                float(cleaning_config["datetime_parse_ratio"])
+                if has_date_name_hint
+                else max(0.85, float(cleaning_config["datetime_parse_ratio"]))
+            )
+            if parse_ratio < required_parse_ratio:
                 continue
 
             failed_mask = cleaned_df[column].notna() & converted_series.isna()
@@ -676,6 +815,8 @@ def _clean_dataframe(
     if should_convert_numeric:
         for column in list(cleaned_df.select_dtypes(include=["object", "string"]).columns):
             column_name = str(column)
+            if column_name in manual_override_columns:
+                continue
             if _is_protected_text_column(column_name):
                 continue
 
@@ -683,9 +824,7 @@ def _clean_dataframe(
             if non_null_values.empty:
                 continue
 
-            sanitized_values = _sanitize_numeric_strings(non_null_values)
-            parsed_values = pd.to_numeric(sanitized_values, errors="coerce")
-            numeric_like_ratio = float(parsed_values.notna().sum()) / float(len(non_null_values))
+            numeric_like_ratio = _numeric_text_ratio(non_null_values)
             if numeric_like_ratio < float(cleaning_config["numeric_like_ratio"]):
                 continue
 
@@ -822,16 +961,29 @@ def _clean_dataframe(
             if non_null_series.empty:
                 continue
 
+            should_preserve_whole_numbers = _is_whole_number_series(non_null_series)
             skew_value = non_null_series.skew()
             use_median = bool(pd.notna(skew_value) and abs(float(skew_value)) > float(cleaning_config["numeric_skew_threshold"]))
             fill_value = non_null_series.median() if use_median else non_null_series.mean()
             if pd.isna(fill_value):
                 continue
+            if should_preserve_whole_numbers:
+                fill_value = int(round(float(fill_value)))
 
             cleaned_df[column] = cleaned_df[column].fillna(fill_value)
+            if should_preserve_whole_numbers and _is_whole_number_series(cleaned_df[column]):
+                cleaned_df[column] = cleaned_df[column].round().astype("Int64")
             filled_count = max(missing_before_fill - int(cleaned_df[column].isna().sum()), 0)
             method = "median" if use_median else "mean"
-            filled_numeric_columns.append({"column": column_name, "method": method, "filled": int(filled_count)})
+            filled_numeric_columns.append(
+                {
+                    "column": column_name,
+                    "method": method,
+                    "filled": int(filled_count),
+                    "fill_value": _json_safe(fill_value),
+                    "preserved_whole_numbers": should_preserve_whole_numbers,
+                }
+            )
             if use_median:
                 filled_numeric_median += filled_count
             else:
@@ -1020,6 +1172,7 @@ def _clean_dataframe(
             "fill_text_with_mode": should_fill_text_with_mode,
             "critical_keywords": list(critical_keywords),
             "required_keywords": list(required_keywords),
+            "column_type_overrides": applied_type_overrides,
             "required_missing_drop_threshold": cleaning_config["required_missing_drop_threshold"],
             "numeric_skew_threshold": cleaning_config["numeric_skew_threshold"],
         },
@@ -1039,7 +1192,9 @@ def _clean_dataframe(
         "filled_datetime_ffill": int(filled_datetime_ffill),
         "converted_columns": converted_columns,
         "date_columns_converted": [item["column"] for item in converted_columns if item["to_type"] == "datetime"],
-        "numeric_columns_converted": [item["column"] for item in converted_columns if item["to_type"] == "numeric"],
+        "numeric_columns_converted": [item["column"] for item in converted_columns if item["to_type"] in {"numeric", "currency"}],
+        "currency_columns_converted": [item["column"] for item in converted_columns if item["to_type"] == "currency"],
+        "semantic_type_overrides": applied_type_overrides,
         "text_columns_standardized": standardized_text_columns,
         "nulls_normalized": int(nulls_normalized),
         "rows_dropped": rows_dropped,
@@ -1058,37 +1213,79 @@ def _clean_dataframe(
 
 def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
     df = _get_user_visible_dataframe(df)
-    numeric_columns = list(df.select_dtypes(include=["number"]).columns)
+    row_count = int(df.shape[0])
+    all_numeric_columns = [
+        column
+        for column in list(df.select_dtypes(include=["number"]).columns)
+        if not pd.api.types.is_bool_dtype(df[column])
+    ]
+    excluded_numeric_identifiers = [
+        str(column)
+        for column in all_numeric_columns
+        if _is_identifier_column_for_analysis(str(column), df[column], row_count)
+    ]
+    numeric_columns = [
+        column
+        for column in all_numeric_columns
+        if str(column) not in excluded_numeric_identifiers
+    ]
     categorical_columns = list(
         df.select_dtypes(exclude=["number", "datetime", "datetimetz"]).columns
     )
 
     numeric_summary: list[dict[str, object]] = []
     for column in numeric_columns:
-        series = df[column]
+        series = pd.to_numeric(df[column], errors="coerce")
         non_null_series = series.dropna()
+        mean_value = non_null_series.mean() if not non_null_series.empty else None
+        median_value = non_null_series.median() if not non_null_series.empty else None
+        std_value = non_null_series.std() if len(non_null_series) > 1 else None
+        q1_value = non_null_series.quantile(0.25) if len(non_null_series) > 1 else None
+        q3_value = non_null_series.quantile(0.75) if len(non_null_series) > 1 else None
+        outlier_count = 0
+        if q1_value is not None and q3_value is not None:
+            iqr_value = q3_value - q1_value
+            if pd.notna(iqr_value) and float(iqr_value) > 0:
+                lower_bound = q1_value - (1.5 * iqr_value)
+                upper_bound = q3_value + (1.5 * iqr_value)
+                outlier_count = int(((non_null_series < lower_bound) | (non_null_series > upper_bound)).sum())
+
+        coefficient_of_variation = None
+        if mean_value is not None and pd.notna(mean_value) and abs(float(mean_value)) > 1e-9 and std_value is not None:
+            coefficient_of_variation = abs(float(std_value) / float(mean_value))
+
         numeric_summary.append(
             {
-                "column": column,
+                "column": str(column),
+                "non_null_count": int(non_null_series.shape[0]),
+                "missing_values": int(series.isna().sum()),
                 "sum": _round_or_none(non_null_series.sum()) if not non_null_series.empty else None,
-                "mean": _round_or_none(series.mean()),
-                "median": _round_or_none(series.median()),
-                "min": _round_or_none(series.min()),
-                "max": _round_or_none(series.max()),
-                "std": _round_or_none(series.std()),
+                "mean": _round_or_none(mean_value),
+                "median": _round_or_none(median_value),
+                "min": _round_or_none(non_null_series.min()) if not non_null_series.empty else None,
+                "max": _round_or_none(non_null_series.max()) if not non_null_series.empty else None,
+                "std": _round_or_none(std_value),
+                "q1": _round_or_none(q1_value),
+                "q3": _round_or_none(q3_value),
+                "outlier_count": outlier_count,
+                "coefficient_of_variation": _round_or_none(coefficient_of_variation),
+                "whole_number_values": _is_whole_number_series(non_null_series),
             }
         )
 
     top_frequencies: list[dict[str, object]] = []
-    for column in categorical_columns[:5]:
+    for column in categorical_columns[:8]:
         values = df[column].dropna().astype(str)
         if values.empty:
             continue
 
         counts = values.value_counts().head(5)
+        top_count = int(counts.iloc[0]) if len(counts) > 0 else 0
         top_frequencies.append(
             {
-                "column": column,
+                "column": str(column),
+                "unique_values": int(values.nunique()),
+                "top_share": _round_or_none(top_count / max(len(values), 1), 3),
                 "values": [
                     {"label": label, "count": int(count)} for label, count in counts.items()
                 ],
@@ -1111,10 +1308,139 @@ def _build_analysis(df: pd.DataFrame) -> dict[str, object]:
             if row:
                 correlation_matrix.append({"column": source_column, "correlations": row})
 
+    relationship_insights: list[dict[str, object]] = []
+    seen_pairs: set[str] = set()
+    for row in correlation_matrix:
+        source_column = str(row["column"])
+        correlations = row.get("correlations") if isinstance(row, dict) else {}
+        if not isinstance(correlations, dict):
+            continue
+        for target_column, score in correlations.items():
+            pair_key = "::".join(sorted([source_column, str(target_column)]))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            numeric_score = float(score)
+            abs_score = abs(numeric_score)
+            strength = "strong" if abs_score >= 0.75 else "moderate" if abs_score >= 0.45 else "light"
+            direction = "positive" if numeric_score >= 0 else "negative"
+            relationship_insights.append(
+                {
+                    "source": source_column,
+                    "target": str(target_column),
+                    "score": _round_or_none(numeric_score, 3),
+                    "strength": strength,
+                    "direction": direction,
+                    "interpretation": f"{source_column} and {target_column} show a {strength} {direction} relationship.",
+                }
+            )
+    relationship_insights.sort(key=lambda item: abs(float(item["score"] or 0)), reverse=True)
+
+    primary_measure = _choose_primary_measure(numeric_summary)
+    segment_breakdowns: list[dict[str, object]] = []
+    if primary_measure and primary_measure in df.columns:
+        measure_values = pd.to_numeric(df[primary_measure], errors="coerce")
+        measure_total = float(measure_values.sum(skipna=True))
+        for column in categorical_columns[:8]:
+            values = df[column].dropna()
+            unique_count = int(values.nunique(dropna=True))
+            if unique_count == 0 or unique_count > min(30, max(8, int(row_count * 0.7))):
+                continue
+
+            grouped_df = pd.DataFrame({"segment": df[column].astype("string"), "measure": measure_values}).dropna()
+            if grouped_df.empty:
+                continue
+
+            grouped = grouped_df.groupby("segment", dropna=True)["measure"].sum().sort_values(ascending=False).head(5)
+            leaders = [
+                {
+                    "label": str(label),
+                    "value": _round_or_none(value),
+                    "share": _round_or_none(float(value) / measure_total, 3) if abs(measure_total) > 1e-9 else None,
+                }
+                for label, value in grouped.items()
+            ]
+            if leaders:
+                segment_breakdowns.append(
+                    {
+                        "column": str(column),
+                        "measure": primary_measure,
+                        "leaders": leaders,
+                    }
+                )
+
+    smart_insights: list[dict[str, object]] = []
+    missing_total = int(df.isna().sum().sum())
+    if excluded_numeric_identifiers:
+        smart_insights.append(
+            {
+                "type": "scope",
+                "title": "Identifier columns excluded",
+                "detail": f"{', '.join(excluded_numeric_identifiers[:3])} were treated as identifiers, not performance measures.",
+                "priority": "medium",
+            }
+        )
+    if missing_total > 0:
+        smart_insights.append(
+            {
+                "type": "quality",
+                "title": "Remaining missing values",
+                "detail": f"{missing_total} missing cell(s) remain and should be reviewed before final reporting.",
+                "priority": "high" if missing_total > max(row_count, 1) * 0.05 else "medium",
+            }
+        )
+    elif row_count > 0:
+        smart_insights.append(
+            {
+                "type": "quality",
+                "title": "Complete active dataset",
+                "detail": "No missing cells remain in the active analysis dataset.",
+                "priority": "low",
+            }
+        )
+
+    if segment_breakdowns:
+        leader = segment_breakdowns[0]["leaders"][0]
+        smart_insights.append(
+            {
+                "type": "driver",
+                "title": "Top segment driver",
+                "detail": f"{leader['label']} leads {segment_breakdowns[0]['column']} by {primary_measure} with {leader['value']}.",
+                "priority": "high",
+            }
+        )
+
+    if relationship_insights:
+        smart_insights.append(
+            {
+                "type": "relationship",
+                "title": "Strongest numeric relationship",
+                "detail": relationship_insights[0]["interpretation"],
+                "priority": "high" if abs(float(relationship_insights[0]["score"] or 0)) >= 0.75 else "medium",
+            }
+        )
+
+    outlier_summaries = [summary for summary in numeric_summary if int(summary.get("outlier_count") or 0) > 0]
+    if outlier_summaries:
+        top_outlier_summary = max(outlier_summaries, key=lambda item: int(item.get("outlier_count") or 0))
+        smart_insights.append(
+            {
+                "type": "risk",
+                "title": "Outlier review needed",
+                "detail": f"{top_outlier_summary['column']} has {top_outlier_summary['outlier_count']} possible outlier value(s).",
+                "priority": "medium",
+            }
+        )
+
     return {
         "numeric_summary": numeric_summary,
         "top_frequencies": top_frequencies,
         "correlation_matrix": correlation_matrix,
+        "relationship_insights": relationship_insights,
+        "segment_breakdowns": segment_breakdowns,
+        "smart_insights": smart_insights,
+        "excluded_numeric_identifiers": excluded_numeric_identifiers,
+        "primary_measure": primary_measure,
     }
 
 
@@ -1181,6 +1507,50 @@ def _build_ai_trends(df: pd.DataFrame, numeric_summary: list[dict[str, object]])
             trends[column] = f"{direction} trend by row order; {change_note}"
 
     return trends
+
+
+def _is_identifier_column_for_analysis(column_name: str, series: pd.Series, row_count: int) -> bool:
+    normalized_name = _normalize_column_name(column_name)
+    tokens = set(normalized_name.split("_"))
+    if tokens.intersection({"id", "code", "uuid", "key"}):
+        return True
+
+    non_null_count = int(series.notna().sum())
+    unique_ratio = float(series.nunique(dropna=True)) / max(non_null_count, 1)
+    return bool(unique_ratio >= 0.95 and (normalized_name.endswith("_no") or normalized_name.endswith("_number")))
+
+
+def _choose_primary_measure(numeric_summary: list[dict[str, object]]) -> str | None:
+    if not numeric_summary:
+        return None
+
+    priority_keywords = (
+        "sales",
+        "revenue",
+        "amount",
+        "total",
+        "profit",
+        "income",
+        "cost",
+        "price",
+        "quantity",
+        "qty",
+        "units",
+    )
+    for keyword in priority_keywords:
+        for summary in numeric_summary:
+            if keyword in _normalize_column_name(str(summary.get("column", ""))):
+                return str(summary["column"])
+
+    sortable_summaries = [
+        summary
+        for summary in numeric_summary
+        if isinstance(summary.get("sum"), (int, float)) and summary.get("column")
+    ]
+    if not sortable_summaries:
+        return str(numeric_summary[0]["column"])
+
+    return str(max(sortable_summaries, key=lambda item: abs(float(item.get("sum") or 0)))["column"])
 
 
 def _build_gemini_dataset_summary(
@@ -3333,8 +3703,10 @@ def _build_updated_dataframe(
     columns: list[str],
     rows: list[dict[str, object]],
     previous_df: pd.DataFrame,
+    column_type_overrides: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     normalized_columns = [str(column) for column in columns]
+    column_type_overrides = column_type_overrides or {}
     normalized_rows: list[dict[str, object]] = []
 
     for row in rows:
@@ -3366,6 +3738,36 @@ def _build_updated_dataframe(
         updated_series = updated_df[column]
         non_null_count = int(updated_series.notna().sum())
         if non_null_count == 0:
+            continue
+
+        override_type = _normalize_type_override(column_type_overrides.get(column))
+        if override_type == "text":
+            updated_df[column] = updated_series.astype("string")
+            continue
+
+        if override_type == "date":
+            parsed = _parse_datetime_series(updated_series)
+            invalid_mask = updated_series.notna() & parsed.isna()
+            if bool(invalid_mask.any()):
+                row_numbers = ", ".join(str(index + 1) for index in updated_df.index[invalid_mask][:5])
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{column} must be a valid date/time. Invalid value found on row(s): {row_numbers}",
+                )
+            updated_df[column] = parsed
+            continue
+
+        if override_type in {"number", "currency"}:
+            parsed = pd.to_numeric(_sanitize_numeric_strings(updated_series), errors="coerce")
+            invalid_mask = updated_series.notna() & parsed.isna()
+            if bool(invalid_mask.any()):
+                row_numbers = ", ".join(str(index + 1) for index in updated_df.index[invalid_mask][:5])
+                label = "currency" if override_type == "currency" else "numeric"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{column} must be {label}. Invalid value found on row(s): {row_numbers}",
+                )
+            updated_df[column] = parsed
             continue
 
         if _is_numeric_input_column(column, previous_series):
@@ -3421,10 +3823,25 @@ def _build_cleaning_config_from_payload(payload: CleaningConfigPayload | None) -
             if str(keyword).strip()
         )
 
+    if "column_type_overrides" in config:
+        config["column_type_overrides"] = _normalize_column_type_overrides(config["column_type_overrides"])
+
     if config.get("required_missing_drop_threshold") == 0:
         config["required_missing_drop_threshold"] = None
 
     return config
+
+
+def _normalize_column_type_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
+    if not isinstance(overrides, dict):
+        return {}
+
+    return {
+        str(column).strip(): normalized_type
+        for column, override_type in overrides.items()
+        for normalized_type in [_normalize_type_override(override_type)]
+        if str(column).strip() and normalized_type
+    }
 
 
 @app.post("/upload")
@@ -3450,6 +3867,7 @@ async def upload_file(file: UploadFile = File(...)) -> dict[str, object]:
         "raw": df,
         "cleaned": None,
         "cleaning_summary": None,
+        "semantic_types": {},
     }
 
     return {
@@ -3471,11 +3889,13 @@ def get_profile(
 ) -> dict[str, object]:
     dataset = _get_dataset(dataset_id)
     df, resolved_stage = _select_dataframe(dataset, stage)
+    semantic_types = dataset.get("semantic_types")
+    semantic_types = semantic_types if isinstance(semantic_types, dict) else {}
 
     return {
         "dataset_id": dataset_id,
         "stage": resolved_stage,
-        "profile": _build_profile(df, preview_limit=preview_rows),
+        "profile": _build_profile(df, preview_limit=preview_rows, semantic_types=semantic_types),
     }
 
 
@@ -3528,6 +3948,8 @@ def get_dataset_state(
     cleaned_df = dataset.get("cleaned")
     has_cleaned = isinstance(cleaned_df, pd.DataFrame)
     active_df = cleaned_df if has_cleaned else raw_df
+    semantic_types = dataset.get("semantic_types")
+    semantic_types = semantic_types if isinstance(semantic_types, dict) else {}
 
     full_dataset = _build_full_dataset(active_df)
 
@@ -3541,8 +3963,8 @@ def get_dataset_state(
         "total_rows": full_dataset["total_rows"],
         "total_columns": full_dataset["total_columns"],
         "approx_size_bytes": _estimate_dataframe_size_bytes(active_df),
-        "raw_profile": _build_profile(raw_df, preview_limit=preview_rows),
-        "cleaned_profile": _build_profile(cleaned_df, preview_limit=preview_rows)
+        "raw_profile": _build_profile(raw_df, preview_limit=preview_rows, semantic_types=semantic_types),
+        "cleaned_profile": _build_profile(cleaned_df, preview_limit=preview_rows, semantic_types=semantic_types)
         if has_cleaned
         else None,
         "cleaning_summary": _json_safe(dataset.get("cleaning_summary")),
@@ -3572,10 +3994,12 @@ def update_raw_dataset(dataset_id: str, payload: DatasetUpdatePayload) -> dict[s
     if len(set(payload.columns)) != len(payload.columns):
         raise HTTPException(status_code=400, detail="Column names must be unique")
 
-    updated_df = _build_updated_dataframe(payload.columns, payload.rows, raw_df)
+    semantic_types = _normalize_column_type_overrides(payload.column_type_overrides)
+    updated_df = _build_updated_dataframe(payload.columns, payload.rows, raw_df, semantic_types)
     dataset["raw"] = updated_df
     dataset["cleaned"] = None
     dataset["cleaning_summary"] = None
+    dataset["semantic_types"] = semantic_types
     dataset.pop("ai_insights_cache", None)
 
     full_dataset = _build_full_dataset(updated_df)
@@ -3588,7 +4012,7 @@ def update_raw_dataset(dataset_id: str, payload: DatasetUpdatePayload) -> dict[s
         "total_rows": full_dataset["total_rows"],
         "total_columns": full_dataset["total_columns"],
         "approx_size_bytes": _estimate_dataframe_size_bytes(updated_df),
-        "profile": _build_profile(updated_df, preview_limit=20),
+        "profile": _build_profile(updated_df, preview_limit=20, semantic_types=semantic_types),
     }
 
 
@@ -3602,12 +4026,19 @@ def clean_dataset(dataset_id: str, payload: CleaningConfigPayload | None = None)
     cleaned_df, summary = _clean_dataframe(raw_df, _build_cleaning_config_from_payload(payload))
     dataset["cleaned"] = cleaned_df
     dataset["cleaning_summary"] = summary
+    semantic_types = summary.get("semantic_type_overrides")
+    previous_semantic_types = dataset.get("semantic_types")
+    previous_semantic_types = previous_semantic_types if isinstance(previous_semantic_types, dict) else {}
+    dataset["semantic_types"] = {
+        **previous_semantic_types,
+        **(semantic_types if isinstance(semantic_types, dict) else {}),
+    }
     dataset.pop("ai_insights_cache", None)
 
     return {
         "dataset_id": dataset_id,
         "cleaning_summary": summary,
-        "profile": _build_profile(cleaned_df, preview_limit=12),
+        "profile": _build_profile(cleaned_df, preview_limit=12, semantic_types=dataset["semantic_types"]),
     }
 
 
@@ -3632,7 +4063,11 @@ def reset_cleaning(dataset_id: str) -> dict[str, object]:
         "total_rows": full_dataset["total_rows"],
         "total_columns": full_dataset["total_columns"],
         "approx_size_bytes": _estimate_dataframe_size_bytes(raw_df),
-        "profile": _build_profile(raw_df, preview_limit=20),
+        "profile": _build_profile(
+            raw_df,
+            preview_limit=20,
+            semantic_types=dataset.get("semantic_types") if isinstance(dataset.get("semantic_types"), dict) else {},
+        ),
     }
 
 

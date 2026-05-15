@@ -282,7 +282,7 @@ export function AtlasProvider({ children }) {
     }
   }
 
-  async function saveDatasetEdits({ columns, rows }) {
+  async function saveDatasetEdits({ columns, rows, columnTypeOverrides = {} }) {
     if (!datasetId) {
       setErrorMessage('Upload a dataset before saving edits.')
       return
@@ -297,7 +297,11 @@ export function AtlasProvider({ children }) {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ columns, rows }),
+        body: JSON.stringify({
+          columns,
+          rows,
+          column_type_overrides: columnTypeOverrides,
+        }),
       })
 
       setUploadedDataset({

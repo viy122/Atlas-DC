@@ -4,7 +4,7 @@ import { DatasetPill } from './CompactUI'
 import { useAtlas } from '../context/AtlasContext'
 
 const ROUTE_TITLES = {
-  '/': 'Dashboard',
+  '/dashboard': 'Dashboard',
   '/dataset': 'Upload',
   '/profiling': 'Profile',
   '/cleaning': 'Clean',
@@ -14,7 +14,7 @@ const ROUTE_TITLES = {
 
 const WORKFLOW_ROUTES = ['/dataset', '/profiling', '/cleaning', '/analysis', '/visualization']
 
-function TopNavigation({ onStartTour, isPreparingTour = false }) {
+function TopNavigation({ onLogout, onStartTour, isPreparingTour = false, userName = 'ATLAS User' }) {
   const { fileName } = useAtlas()
   const location = useLocation()
   const title = ROUTE_TITLES[location.pathname] ?? 'Dashboard'
@@ -57,11 +57,20 @@ function TopNavigation({ onStartTour, isPreparingTour = false }) {
 
           <DatasetPill name={fileName} className="top-nav__dataset" />
 
-          <span className="top-nav__avatar" aria-label="ATLAS profile">A</span>
+          <span className="top-nav__avatar" aria-label="ATLAS profile">{getInitials(userName)}</span>
+          <button type="button" className="top-nav__logout-button" onClick={onLogout} title="Logout">
+            <AtlasIcon name="logout" />
+            <span>Logout</span>
+          </button>
         </div>
       </div>
     </header>
   )
+}
+
+function getInitials(name = '') {
+  const parts = String(name || 'A').trim().split(/\s+/).filter(Boolean)
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'A'
 }
 
 export default TopNavigation

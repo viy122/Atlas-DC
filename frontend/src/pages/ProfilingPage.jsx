@@ -30,7 +30,7 @@ function ProfilingPage() {
     const typeCounts = { NUMBER: 0, STRING: 0, BOOLEAN: 0, DATETIME: 0 }
 
     for (const column of columnProfiles) {
-      const type = formatDataType(column.dtype)
+      const type = formatDataType(column.dtype, column.semantic_type)
       typeCounts[type] = (typeCounts[type] ?? 0) + 1
     }
 
@@ -126,7 +126,7 @@ function ProfilingPage() {
                     <td>
                       <strong>{column.name}</strong>
                     </td>
-                    <td><TypeChip type={formatDataType(column.dtype)} /></td>
+                    <td><TypeChip type={formatDataType(column.dtype, column.semantic_type)} /></td>
                     <td>{formatValue(column.missing_values)}</td>
                     <td>
                       <div className="profile-missing-cell">

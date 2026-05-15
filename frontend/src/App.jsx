@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { useState } from 'react'
 import { BabyAtlasTour } from './components/CompactUI'
 import Sidebar from './components/Sidebar'
@@ -7,10 +7,47 @@ import { AtlasProvider, useAtlas } from './context/AtlasContext'
 import AnalysisPage from './pages/AnalysisPage'
 import CleaningPage from './pages/CleaningPage'
 import HomePage from './pages/HomePage'
+import LandingPage from './pages/LandingPage'
 import ProfilingPage from './pages/ProfilingPage'
 import UploadPage from './pages/UploadPage'
 import VisualizationPage from './pages/VisualizationPage'
 import './App.css'
+
+const AUTH_STORAGE_KEY = 'atlas:local-session'
+
+function getStoredSession() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const rawSession = window.localStorage.getItem(AUTH_STORAGE_KEY)
+  if (!rawSession) {
+    return null
+  }
+
+  try {
+    return JSON.parse(rawSession)
+  } catch {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY)
+    return null
+  }
+}
+
+function storeSession(session) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session))
+}
+
+function clearSession() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.removeItem(AUTH_STORAGE_KEY)
+}
 
 function getWorkflowFallbackPath(workflow) {
   if (workflow.analyzed) {
@@ -44,10 +81,13 @@ function ProtectedPage({ requirement, children }) {
 
 function AppWorkspace() {
   const { resetWorkspace, runAutoClean, uploadDataset } = useAtlas()
+  const location = useLocation()
   const navigate = useNavigate()
+  const [session, setSession] = useState(() => getStoredSession())
   const [tourRestartToken, setTourRestartToken] = useState(0)
   const [tourMode, setTourMode] = useState('standard')
   const [isPreparingTour, setIsPreparingTour] = useState(false)
+  const isLoggedIn = Boolean(session)
 
   async function loadSampleTourDataset() {
     const response = await fetch('/sample_sales_dataset.csv')
@@ -98,15 +138,55 @@ function AppWorkspace() {
     }
   }
 
+  function handleLogin(nextSession) {
+    const normalizedSession = {
+      name: nextSession.name || 'ATLAS User',
+      email: nextSession.email || '',
+      loggedInAt: new Date().toISOString(),
+    }
+
+    storeSession(normalizedSession)
+    setSession(normalizedSession)
+    navigate('/dashboard')
+  }
+
+  function handleLogout() {
+    clearSession()
+    setSession(null)
+    resetWorkspace()
+    navigate('/')
+  }
+
+  if (location.pathname === '/') {
+    return (
+      <LandingPage
+        isLoggedIn={isLoggedIn}
+        userName={session?.name ?? ''}
+        onLogin={handleLogin}
+        onLogout={handleLogout}
+        onOpenApp={() => navigate(isLoggedIn ? '/dashboard' : '/')}
+      />
+    )
+  }
+
+  if (!isLoggedIn) {
+    return <Navigate to="/" replace />
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar userName={session?.name ?? 'ATLAS User'} />
       <div className="app-content">
-        <TopNavigation onStartTour={startDemoTour} isPreparingTour={isPreparingTour} />
+        <TopNavigation
+          onLogout={handleLogout}
+          onStartTour={startDemoTour}
+          isPreparingTour={isPreparingTour}
+          userName={session?.name ?? 'ATLAS User'}
+        />
 
         <main className="app-main" data-tour="main-workspace">
           <Routes>
-            <Route path="/" element={<HomePage />} />
+            <Route path="/dashboard" element={<HomePage />} />
             <Route path="/dataset" element={<UploadPage />} />
             <Route path="/profiling" element={<ProtectedPage requirement="uploaded"><ProfilingPage /></ProtectedPage>} />
             <Route path="/cleaning" element={<ProtectedPage requirement="profiled"><CleaningPage /></ProtectedPage>} />
@@ -114,11 +194,12 @@ function AppWorkspace() {
             <Route path="/visualization" element={<ProtectedPage requirement="analyzed"><VisualizationPage /></ProtectedPage>} />
 
             <Route path="/upload" element={<Navigate to="/dataset" replace />} />
+            <Route path="/home" element={<Navigate to="/dashboard" replace />} />
             <Route path="/insights" element={<Navigate to="/analysis" replace />} />
             <Route path="/dashboard-builder" element={<Navigate to="/visualization" replace />} />
             <Route path="/reports" element={<Navigate to="/analysis" replace />} />
 
-            <Route path="*" element={<Navigate to="/dataset" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>
         <BabyAtlasTour restartToken={tourRestartToken} mode={tourMode} onClose={finishDemoTour} />
